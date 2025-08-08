@@ -1,0 +1,327 @@
+[package]
+name = "loki"
+version = "0.2.0"
+edition = "2021"
+authors = ["thermo <thermo@polysystems.ai>"]
+description = "A cognitive workstation for autonomous agents and general purpose AI"
+repository = "https://github.com/polysystems/loki"
+license = "Apache-2.0"
+keywords = [
+    "autonomous-ai",
+    "cognitive-computing",
+    "rust",
+    "llm",
+    "ai",
+    "agentic",
+    "autonomous",
+    "cognitive-workstation",
+    "cognitive-agent",
+    "cognitive-ai",
+    "cognitive-workstation",
+]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+tokio = { version = "1.41", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+async-trait = "0.1"
+futures = "0.3"
+futures-util = "0.3"
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+serde_urlencoded = "0.7"
+toml = "0.8"
+semver = "1.0"
+warp = "0.3"
+bincode = { version = "2.0.1", features = ["serde"] }
+rmp-serde = "1.3"
+clap = { version = "4.5", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+colored = "2.0"
+dialoguer = "0.11"
+ratatui = { version = "0.29", features = ["all-widgets"] }
+crossterm = "0.28"
+fuzzy-matcher = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+axum = { version = "0.8.4", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.5", features = ["cors", "timeout", "trace", "fs"] }
+urlencoding = "2.1"
+scraper = "0.22"
+url = "2.5"
+async-recursion = "1.1"
+octocrab = "0.41"
+lettre = "0.11"
+tokio-tungstenite = "0.24"
+tungstenite = "0.24"
+candle-core = { version = "0.8", default-features = false, features = [] }
+dirs = "6.0.0"
+regex = "1.11.1"
+rayon = "1.10.0"
+parking_lot = "0.12.4"
+rand = "0.8.5"
+rand_distr = "0.4.3"
+fastrand = "2.3.0"
+sha2 = "0.11.0-rc.0"
+num_cpus = "1.17.0"
+base64 = "0.22.1"
+sysinfo = "0.36.0"
+uuid = { version = "1.17", features = ["v4", "serde", "rng"] }
+petgraph = "0.6"
+libc = "0.2"
+tempfile = "3.14"
+dotenvy = "0.15"
+syn = { version = "2.0", features = ["parsing", "full"] }
+quote = "1.0"
+walkdir = "2.5"
+crossbeam-channel = "0.5"
+flate2 = "1.0"
+hmac = "0.13.0-rc.0"
+sha1 = "0.11.0-rc.0"
+ed25519-dalek = "2.1"
+glob = "0.3"
+libloading = "0.8"
+wasmtime = "26.0.1"
+sha256 = "1.5"
+zip = "2.4.2"
+tar = "0.4"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+wide = "0.7"
+dashmap = "6.1"
+rocksdb = "0.22"
+ndarray = "0.16"
+lru = "0.12"
+itertools = "0.13"
+nix = { version = "0.29", features = ["signal", "process"] }
+notify = "7.0"
+directories = "5.0"
+arc-swap = "1.7"
+image = "0.25"
+lz4_flex = "0.11"
+wgpu = "25.0.2"
+which = "7.0"
+once_cell = "1.21"
+chacha20poly1305 = "0.10"
+nvml-wrapper = "0.10"
+zeroize = "1.8"
+aes-gcm = "0.10"
+jsonwebtoken = "9.3"
+argon2 = "0.5"
+deadpool-redis = "0.18"
+sqlx = { version = "0.8", features = ["mysql", "postgres", "_sqlite", "sqlite"] }
+mongodb = "3.1"
+strsim = "0.11.1"
+
+
+# CUDA - Available on Linux x86_64 and Windows (where NVIDIA GPUs are most common)
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+cudarc = { version = "0.12", optional = true }
+nvml-wrapper = { version = "0.10", optional = true }
+
+# CUDA - Windows support (common for gaming and workstation GPUs)
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+cudarc = { version = "0.12", optional = true }
+nvml-wrapper = { version = "0.10", optional = true }
+winapi = { version = "0.3", features = ["fileapi"] }
+
+# Metal - Only on macOS for Apple Silicon/AMD GPUs
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "0.29", optional = true }
+
+# SIMD and performance - Rust 2025 optimizations
+wide = "0.7"   # Stable SIMD operations (fallback)
+rayon = "1.10"
+# Note: std::simd used via nightly feature flags
+
+# Memory and caching
+lru = "0.12"
+rocksdb = "0.22"
+lz4_flex = "0.11"
+
+# Database support for comprehensive data management
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "sqlite", "mysql", "chrono", "uuid", "json"] }
+deadpool-redis = "0.18"
+mongodb = "3.1"
+redis = "0.27" # Direct Redis client for simple operations
+
+# Model streaming and memory management
+
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+dashmap = "6.1"
+arc-swap = "1.7"
+
+# Cognitive memory structures
+# Graph structures for memory networks
+ndarray = "0.16" # N-dimensional arrays for embeddings
+
+# System monitoring
+# sysinfo already specified above
+
+# Random number generation
+# rand, fastrand already specified above
+
+# Cryptography
+# sha1, sha2, hmac already specified above with compatible versions
+sha256 = "1.5"
+base64 = "0.22"
+
+# Authentication and security
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
+pbkdf2 = "0.11"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+once_cell = "1.21"
+jsonwebtoken = "9.3"
+
+# Plugin system
+# wasmtime already specified above
+# libloading already specified above
+
+# File system operations
+notify = "7.0"
+walkdir = "2.5"
+syn = { version = "2.0", features = ["full", "parsing"] }
+quote = "1.0"
+regex = "1.11"
+flate2 = "1.0"
+tar = "0.4"
+
+# Configuration management
+directories = "5.0"
+dotenvy = "0.15"
+
+# Utilities
+humantime-serde = "1.1"
+itertools = "0.13"
+
+# Process management
+nix = { version = "0.29", features = ["process", "signal"] }
+libc = "0.2"
+
+# System info
+num_cpus = "1.16"
+
+# Metrics and monitoring
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Testing utilities
+tempfile = "3.14"
+
+# Additional dependencies
+# which, wgpu already specified above
+petgraph = "0.6"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+#proptest = "1.6"
+#pretty_assertions = "1.4"
+#test-case = "3.3"
+#serial_test = "3.2"
+#wiremock = "0.6"
+#fake = "2.10"
+#tokio-test = "0.4"
+
+[features]
+default = ["simd-optimizations"]
+
+# Platform-specific GPU features (only enabled when dependencies are available)
+cuda = ["dep:cudarc", "dep:nvml-wrapper", "candle-core/cuda"]
+metal = ["dep:metal", "candle-core/metal"]
+
+# Cross-platform features
+simd-optimizations = [] # Enable std::simd optimizations for smart caching
+sys-info = []           # System information gathering
+cloud-tpu = []          # Enable Google Cloud TPU support
+plugins = []
+social = []
+
+# TUI Orchestrator features
+deep-cognition = []     # Enhanced cognitive commands in TUI
+story-enhancement = []  # Story-driven capabilities in TUI
+agent-streams = []      # Agent streaming support in TUI
+full-orchestration = ["deep-cognition", "story-enhancement", "agent-streams"]
+
+# Platform-aware feature sets
+gpu-nvidia = ["cuda"]
+gpu-apple = ["metal"]
+
+# Platform-aware feature combinations
+all-linux = [
+    "simd-optimizations",
+    "sys-info",
+    "cloud-tpu",
+    "plugins",
+    "social",
+    "gpu-nvidia",
+]
+all-macos = [
+    "simd-optimizations",
+    "sys-info",
+    "cloud-tpu",
+    "plugins",
+    "social",
+    "gpu-apple",
+]
+all-windows = [
+    "simd-optimizations",
+    "sys-info",
+    "cloud-tpu",
+    "plugins",
+    "social",
+    "gpu-nvidia",
+]
+all-safe = ["simd-optimizations", "sys-info", "cloud-tpu", "plugins", "social"]
+
+# Legacy all feature (for compatibility)
+all = ["all-safe"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
+panic = "abort"    # 300KB savings + better optimization
+incremental = true
+
+[profile.release.build-override]
+opt-level = 3 # Optimize build scripts too
+
+[profile.dev]
+opt-level = 0
+incremental = true
+
+[profile.test]
+opt-level = 2
+
+[profile.compute]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[lib]
+name = "loki"
+path = "src/lib.rs"
+
+[[bin]]
+name = "loki"
+path = "src/main.rs"
+
+[[bin]]
+name = "loki-daemon"
+path = "src/bin/loki-daemon.rs"
+
+
+[build-dependencies]
+tonic-build = "0.12"
+which = "7.0"

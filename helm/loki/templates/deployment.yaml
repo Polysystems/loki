@@ -1,0 +1,173 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "loki.fullname" . }}
+  labels:
+    {{- include "loki.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "loki.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "loki.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "loki.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        - name: ollama-init
+          image: ollama/ollama:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "Starting Ollama service..."
+              ollama serve &
+              sleep 10
+              echo "Pulling required models..."
+              ollama pull {{ .Values.loki.models.orchestrator }}
+              echo "Models ready"
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            {{- range .Values.env }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loki.fullname" . }}-secret
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loki.fullname" . }}-secret
+                  key: redis-url
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loki.fullname" . }}-secret
+                  key: openai-api-key
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loki.fullname" . }}-secret
+                  key: anthropic-api-key
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loki.fullname" . }}-secret
+                  key: github-token
+            - name: X_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loki.fullname" . }}-secret
+                  key: x-api-key
+            - name: X_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loki.fullname" . }}-secret
+                  key: x-api-secret
+            - name: X_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loki.fullname" . }}-secret
+                  key: x-access-token
+            - name: X_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loki.fullname" . }}-secret
+                  key: x-access-secret
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: model-storage
+              mountPath: /models
+            - name: config
+              mountPath: /etc/loki
+              readOnly: true
+        - name: ollama
+          image: ollama/ollama:latest
+          command: ["ollama", "serve"]
+          env:
+            - name: OLLAMA_MODELS
+              value: /models
+          ports:
+            - name: ollama
+              containerPort: 11434
+              protocol: TCP
+          resources:
+            limits:
+              memory: 4Gi
+              cpu: 2000m
+            requests:
+              memory: 2Gi
+              cpu: 1000m
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "loki.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: model-storage
+          {{- if .Values.persistence.modelStorage.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "loki.fullname" . }}-models
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: config
+          configMap:
+            name: {{ include "loki.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }} 

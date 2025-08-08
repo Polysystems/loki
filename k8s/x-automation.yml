@@ -1,0 +1,211 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki-x-automation
+  namespace: loki-system
+  labels:
+    app: loki-x-automation
+    component: social-automation
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: loki-x-automation
+  template:
+    metadata:
+      labels:
+        app: loki-x-automation
+        component: social-automation
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8082"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: loki-x
+        image: loki:latest
+        command: ["loki-daemon"]
+        args: ["--mode", "x-automation"]
+        ports:
+        - containerPort: 8082
+          name: metrics
+        envFrom:
+        - configMapRef:
+            name: loki-config
+        - secretRef:
+            name: loki-secrets
+        env:
+        - name: LOKI_SERVICE_MODE
+          value: "x_automation"
+        - name: X_AUTOMATION_ENABLED
+          value: "true"
+        - name: X_POSTING_SCHEDULE
+          value: "0 */4 * * *"  # Every 4 hours
+        - name: X_ENGAGEMENT_ENABLED
+          value: "true"
+        - name: X_AUTO_REPLY
+          value: "true"
+        - name: X_RATE_LIMIT_POSTS_PER_HOUR
+          value: "5"
+        - name: X_RATE_LIMIT_REPLIES_PER_HOUR
+          value: "20"
+        - name: X_CONTENT_SAFETY_MODE
+          value: "strict"
+        volumeMounts:
+        - name: x-data
+          mountPath: /data/x-automation
+        - name: temp-volume
+          mountPath: /tmp
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8082
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 2
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+            ephemeral-storage: "1Gi"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+            ephemeral-storage: "5Gi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: x-data
+        persistentVolumeClaim:
+          claimName: x-automation-pvc
+      - name: temp-volume
+        emptyDir: {}
+      restartPolicy: Always
+      securityContext:
+        fsGroup: 1000
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: x-automation-pvc
+  namespace: loki-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: x-automation-service
+  namespace: loki-system
+  labels:
+    app: loki-x-automation
+spec:
+  selector:
+    app: loki-x-automation
+  ports:
+  - name: metrics
+    port: 8082
+    targetPort: 8082
+    protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: x-content-generation
+  namespace: loki-system
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: content-generator
+            image: loki:latest
+            command: ["loki-daemon"]
+            args: ["--job", "generate-x-content"]
+            envFrom:
+            - configMapRef:
+                name: loki-config
+            - secretRef:
+                name: loki-secrets
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "200m"
+              limits:
+                memory: "1Gi"
+                cpu: "500m"
+          restartPolicy: OnFailure
+      backoffLimit: 3
+
+---
+# Network Policy for X Automation Service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: x-automation-netpol
+  namespace: loki-system
+spec:
+  podSelector:
+    matchLabels:
+      app: loki-x-automation
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: loki-main
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 8082
+  egress:
+  - to: []  # Allow all outbound (needed for X API calls)
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loki-main
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081 

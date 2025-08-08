@@ -1,0 +1,193 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock file (uncomment if you want to ignore it for libraries)
+# Cargo.lock
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-*
+.project
+.classpath
+.settings/
+.cursorrules
+CLAUDE.md
+/.claude
+/backups
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+
+# Log files
+*.log
+logs/
+*.log.*
+
+# Test coverage
+tarpaulin-report.html
+cobertura.xml
+coverage/
+*.profraw
+*.profdata
+/temp_loki_db
+
+# Benchmarking
+/criterion/
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Documentation build artifacts
+/docs/_build/
+/docs/.doctrees/
+/target/doc/
+
+# Python cache (for any Python scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Node modules (if using any JS tooling)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+.cache/
+tmp/
+temp/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Docker volumes
+volumes/
+
+# Kubernetes generated files
+*.kubeconfig
+kubeconfig
+
+# Helm generated files
+/helm/*/charts/
+/helm/*/Chart.lock
+
+# Monitoring data
+/monitoring/prometheus/data/
+/monitoring/grafana/data/
+*.rrd
+
+# Plugin build artifacts
+/examples/plugins/*/target/
+/examples/plugins/*/Cargo.lock
+
+# OS generated files
+Thumbs.db
+.Spotlight-V100
+.Trashes
+
+# Backup files
+*.backup
+*.old
+
+# Local configuration overrides
+*.local.toml
+*.local.yaml
+*.local.yml
+config.local.toml
+
+# Generated binaries
+/loki
+/loki-*
+
+# Core dumps
+
+
+# Memory dumps
+*.dump
+*.heapdump
+
+# Profiling data
+*.prof
+*.heap
+
+# Archive extraction
+*.tar
+*.gz
+*.zip
+*.7z
+!archive/**
+
+# SSL certificates (except examples)
+*.pem
+*.key
+*.crt
+*.csr
+!examples/**/*.pem
+
+# Secrets
+secrets/
+*.secret
+*_secret*
+
+# Build scripts output
+/build/
+/dist/
+/out/
+
+# Integration test data
+/test-data/
+/integration-tests/data/
+
+# Local development
+.direnv/
+.envrc
+shell.nix
+default.nix
+
+# macOS specific
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows specific
+Desktop.ini
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk

@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loki-system
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/version: v1.0
+    app.kubernetes.io/managed-by: kubectl
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: loki-system
+data:
+  RUST_LOG: "info"
+  LOKI_SAFE_MODE: "true"
+  WEB_HOST: "0.0.0.0"
+  WEB_PORT: "8080"
+  API_HOST: "0.0.0.0"
+  API_PORT: "8081"
+  DATABASE_URL: "postgresql://loki:password@postgres-service:5432/loki"
+  REDIS_URL: "redis://redis-service:6379" 

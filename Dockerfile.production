@@ -1,0 +1,208 @@
+# 🚀 Production-Optimized Loki AI Dockerfile
+# Multi-stage build with security hardening and performance optimizations
+
+# ===== Build Dependencies Stage =====
+FROM rust:1.75-slim as deps-builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libpq-dev \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app user and directory
+RUN useradd -m -u 10001 -U loki && \
+    mkdir -p /app && \
+    chown loki:loki /app
+
+WORKDIR /app
+USER loki
+
+# Copy dependency manifests
+COPY --chown=loki:loki Cargo.toml Cargo.lock ./
+
+# Pre-build dependencies (cache layer)
+RUN mkdir src && \
+    echo "fn main() {}" > src/main.rs && \
+    cargo build --release && \
+    rm -rf src
+
+# ===== Main Build Stage =====
+FROM deps-builder as builder
+
+# Copy source code
+COPY --chown=loki:loki src ./src
+COPY --chown=loki:loki benches ./benches
+COPY --chown=loki:loki config ./config
+COPY --chown=loki:loki migrations ./migrations
+
+# Build optimized production binary with security features
+ENV RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C lto=fat -C codegen-units=1 -C panic=abort"
+RUN cargo build --release --bin loki-daemon && \
+    strip target/release/loki-daemon
+
+# ===== Security Scanner Stage =====
+FROM aquasec/trivy:latest as security-scanner
+
+# Copy binary for security scanning
+COPY --from=builder /app/target/release/loki-daemon /tmp/loki-daemon
+
+# Run security scan (this will fail the build if high/critical vulnerabilities found)
+RUN trivy filesystem --exit-code 1 --severity HIGH,CRITICAL /tmp/
+
+# ===== Runtime Base Stage =====
+FROM gcr.io/distroless/cc-debian12:nonroot as runtime-base
+
+# Copy CA certificates
+COPY --from=deps-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+# ===== Production Runtime Stage =====
+FROM runtime-base as production
+
+# Security labels for container scanning
+LABEL org.opencontainers.image.title="Loki AI - Autonomous AI Maintainer"
+LABEL org.opencontainers.image.description="Production-ready autonomous AI system for code maintenance and collaboration"
+LABEL org.opencontainers.image.vendor="Loki AI Team"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.version="0.2.0"
+LABEL org.opencontainers.image.source="https://github.com/loki-ai/loki"
+LABEL security.scan.enabled="true"
+
+# Runtime environment variables
+ENV RUST_LOG=info,loki=debug
+ENV RUST_BACKTRACE=1
+ENV LOKI_SAFE_MODE=true
+ENV LOKI_PRODUCTION=true
+
+# Create directories with proper permissions
+USER root
+RUN mkdir -p /data /models /config /logs && \
+    chown -R 65532:65532 /data /models /config /logs && \
+    chmod 755 /data /models /config /logs
+
+# Switch to non-root user (distroless nonroot = 65532)
+USER 65532:65532
+
+# Copy optimized binary
+COPY --from=builder --chown=65532:65532 /app/target/release/loki-daemon /usr/local/bin/loki-daemon
+
+# Copy configuration templates
+COPY --from=builder --chown=65532:65532 /app/config/production.toml /config/default.toml
+
+# Set working directory
+WORKDIR /data
+
+# Health check with timeout and retries
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["/usr/local/bin/loki-daemon", "--health-check"] || exit 1
+
+# Resource limits (can be overridden by orchestrator)
+ENV LOKI_MAX_MEMORY_GB=16
+ENV LOKI_MAX_CPU_CORES=8
+ENV LOKI_MAX_CONCURRENT_TASKS=10
+
+# Security settings
+ENV LOKI_ENABLE_AUDIT_LOG=true
+ENV LOKI_REQUIRE_TLS=true
+ENV LOKI_SESSION_TIMEOUT=3600
+
+# Expose ports
+EXPOSE 8080/tcp 8081/tcp 9091/tcp
+
+# Use exec form for proper signal handling
+ENTRYPOINT ["/usr/local/bin/loki-daemon"]
+CMD ["--config", "/config/default.toml", "--data-dir", "/data", "--log-dir", "/logs"]
+
+# ===== Development Stage =====
+FROM deps-builder as development
+
+# Install development tools
+USER root
+RUN apt-get update && apt-get install -y \
+    gdb \
+    valgrind \
+    strace \
+    htop \
+    curl \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+USER loki
+
+# Copy source for development
+COPY --chown=loki:loki . .
+
+# Development build with debug symbols
+ENV RUSTFLAGS="-C debuginfo=2"
+RUN cargo build --bin loki-daemon
+
+# Development environment
+ENV RUST_LOG=debug,loki=trace
+ENV LOKI_DEVELOPMENT=true
+ENV LOKI_HOT_RELOAD=true
+
+# Expose additional development ports
+EXPOSE 8080 8081 9091 3000 9229
+
+# Development command with auto-reload
+CMD ["cargo", "run", "--bin", "loki-daemon", "--", "--config", "config/development.toml"]
+
+# ===== Testing Stage =====
+FROM deps-builder as testing
+
+# Install testing dependencies
+USER root
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    redis-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+USER loki
+
+# Copy test files
+COPY --chown=loki:loki . .
+
+# Run comprehensive test suite
+RUN cargo test --all-features --workspace --release
+
+# Run benchmarks
+RUN cargo bench --all-features
+
+# Security audit
+RUN cargo install cargo-audit && cargo audit
+
+# Generate test coverage
+RUN cargo install cargo-tarpaulin && \
+    cargo tarpaulin --all-features --workspace --out html --output-dir coverage/
+
+# Testing command
+CMD ["cargo", "test", "--all-features", "--workspace"]
+
+# ===== CI/CD Stage =====
+FROM deps-builder as ci
+
+# Install CI tools
+USER root
+RUN apt-get update && apt-get install -y \
+    git \
+    openssh-client \
+    docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install additional Rust tools
+USER loki
+RUN cargo install \
+    cargo-audit \
+    cargo-outdated \
+    cargo-unused-deps \
+    cargo-udeps \
+    cargo-deny
+
+# Copy source
+COPY --chown=loki:loki . .
+
+# CI validation command
+CMD ["./scripts/ci-validate.sh"]

@@ -1,0 +1,55 @@
+# SIMD Optimization Configuration for Loki Smart Caching
+# Rust 2025 - Latest nightly features for maximum performance
+
+[simd]
+# Enable portable SIMD for cognitive processing
+enabled = true
+# Use latest nightly optimizations
+use_nightly_features = true
+# Target instruction sets (auto-detected)
+target_features = ["avx2", "fma", "sse4.2", "neon"] # ARM64 and x86_64
+
+[cache]
+# SIMD-optimized cache configuration
+embedding_dimension = 512   # Must be multiple of 8 for f32x8 SIMD
+max_entries = 50000         # Increased for better SIMD batch processing
+similarity_threshold = 0.85
+batch_size = 64             # Optimal for SIMD operations
+prefetch_size = 128         # SIMD-optimized prefetching
+
+[memory]
+# Memory hierarchy optimized for SIMD operations
+short_term_capacity = 1024     # Increased for SIMD batch operations
+long_term_layers = 8           # More layers for distributed SIMD processing
+layer_capacity = 5000          # Optimized for parallel SIMD searches
+consolidation_threshold = 0.75
+decay_rate = 0.98
+
+[performance]
+# Performance optimizations for cognitive processing
+parallel_search_threads = 8       # Optimal for rayon + SIMD
+simd_chunk_size = 8               # f32x8 chunks
+cache_line_alignment = true       # Align data for SIMD efficiency
+vectorized_similarity = true      # Use SIMD for all similarity computations
+batch_embedding_processing = true
+
+[cognitive]
+# Cognitive system SIMD optimizations
+attention_simd = true            # SIMD attention mechanisms
+embedding_simd = true            # SIMD embedding operations
+knowledge_graph_simd = true      # SIMD graph traversal
+memory_consolidation_simd = true
+
+[monitoring]
+# Performance monitoring for SIMD operations
+track_simd_performance = true
+log_cache_hit_rates = true
+benchmark_similarity_search = true
+profile_memory_access_patterns = true
+
+[experimental]
+# Cutting-edge features from latest nightly
+use_std_simd = true             # Use std::simd instead of wide crate
+enable_simd_sort = true         # SIMD-optimized sorting algorithms
+vector_database_simd = true     # SIMD vector database operations
+neural_simd_acceleration = true

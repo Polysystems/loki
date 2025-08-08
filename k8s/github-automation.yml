@@ -1,0 +1,324 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki-github-automation
+  namespace: loki-system
+  labels:
+    app: loki-github-automation
+    component: repository-automation
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: loki-github-automation
+  template:
+    metadata:
+      labels:
+        app: loki-github-automation
+        component: repository-automation
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8083"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: loki-github
+        image: loki:latest
+        command: ["loki-daemon"]
+        args: ["--mode", "github-automation"]
+        ports:
+        - containerPort: 8083
+          name: metrics
+        envFrom:
+        - configMapRef:
+            name: loki-config
+        - secretRef:
+            name: loki-secrets
+        env:
+        - name: LOKI_SERVICE_MODE
+          value: "github_automation"
+        - name: GITHUB_AUTOMATION_ENABLED
+          value: "true"
+        - name: GITHUB_ISSUE_MANAGEMENT
+          value: "true"
+        - name: GITHUB_PR_AUTOMATION
+          value: "true"
+        - name: GITHUB_CODE_REVIEW
+          value: "true"
+        - name: GITHUB_REPO_MONITORING
+          value: "true"
+        - name: GITHUB_AUTO_MERGE_APPROVED_PRS
+          value: "false"
+        - name: GITHUB_AUTO_ASSIGN_REVIEWERS
+          value: "true"
+        - name: GITHUB_AUTO_LABEL_ISSUES
+          value: "true"
+        - name: GITHUB_WEBHOOK_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: loki-secrets
+              key: GITHUB_WEBHOOK_SECRET
+        volumeMounts:
+        - name: github-data
+          mountPath: /data/github-automation
+        - name: temp-volume
+          mountPath: /tmp
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8083
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8083
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 2
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+            ephemeral-storage: "1Gi"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+            ephemeral-storage: "5Gi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: github-data
+        persistentVolumeClaim:
+          claimName: github-automation-pvc
+      - name: temp-volume
+        emptyDir: {}
+      restartPolicy: Always
+      securityContext:
+        fsGroup: 1000
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: github-automation-pvc
+  namespace: loki-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-automation-service
+  namespace: loki-system
+  labels:
+    app: loki-github-automation
+spec:
+  selector:
+    app: loki-github-automation
+  ports:
+  - name: metrics
+    port: 8083
+    targetPort: 8083
+    protocol: TCP
+  - name: webhook
+    port: 9000
+    targetPort: 9000
+    protocol: TCP
+  type: ClusterIP
+
+---
+# GitHub Repository Sync CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: github-repo-sync
+  namespace: loki-system
+spec:
+  schedule: "*/15 * * * *"  # Every 15 minutes
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: repo-sync
+            image: loki:latest
+            command: ["loki-daemon"]
+            args: ["--job", "sync-github-repos"]
+            envFrom:
+            - configMapRef:
+                name: loki-config
+            - secretRef:
+                name: loki-secrets
+            env:
+            - name: SYNC_JOB_MODE
+              value: "incremental"
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "200m"
+              limits:
+                memory: "1Gi"
+                cpu: "500m"
+          restartPolicy: OnFailure
+      backoffLimit: 3
+
+---
+# Code Quality Analysis CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: github-code-analysis
+  namespace: loki-system
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: code-analyzer
+            image: loki:latest
+            command: ["loki-daemon"]
+            args: ["--job", "analyze-code-quality"]
+            envFrom:
+            - configMapRef:
+                name: loki-config
+            - secretRef:
+                name: loki-secrets
+            env:
+            - name: ANALYSIS_DEPTH
+              value: "comprehensive"
+            - name: GENERATE_REPORTS
+              value: "true"
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "4Gi"
+                cpu: "2000m"
+          restartPolicy: OnFailure
+      backoffLimit: 2
+
+---
+# Security Audit CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: github-security-audit
+  namespace: loki-system
+spec:
+  schedule: "0 3 * * 0"  # Weekly on Sunday at 3 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: security-auditor
+            image: loki:latest
+            command: ["loki-daemon"]
+            args: ["--job", "security-audit"]
+            envFrom:
+            - configMapRef:
+                name: loki-config
+            - secretRef:
+                name: loki-secrets
+            env:
+            - name: AUDIT_SCOPE
+              value: "full"
+            - name: CREATE_SECURITY_ISSUES
+              value: "true"
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "300m"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
+          restartPolicy: OnFailure
+      backoffLimit: 2
+
+---
+# Network Policy for GitHub Automation Service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: github-automation-netpol
+  namespace: loki-system
+spec:
+  podSelector:
+    matchLabels:
+      app: loki-github-automation
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: loki-main
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 8083
+  - from: []  # Allow webhooks from GitHub
+    ports:
+    - protocol: TCP
+      port: 9000
+  egress:
+  - to: []  # Allow all outbound (needed for GitHub API calls)
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loki-main
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081
+
+---
+# Service Monitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: github-automation-monitor
+  namespace: loki-system
+  labels:
+    app: loki-github-automation
+spec:
+  selector:
+    matchLabels:
+      app: loki-github-automation
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics 

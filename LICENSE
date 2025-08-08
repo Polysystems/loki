@@ -186,7 +186,7 @@
       same "printed page" as the copyright notice for easier
       identification within third-party archives.
 
-   Copyright [yyyy] [name of copyright owner]
+   Copyright 2025 Polysys Aps (CVR: 45773078)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -199,3 +199,14 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+================================================================================
+
+Additional Information:
+
+- For contributor guidelines and agreements, see CONTRIBUTING.md
+- For enterprise licensing options, see ENTERPRISE_LICENSE.md
+- For questions regarding licensing, contact: thermo@polysystems.ai
+
+This software is owned and maintained by Polysys Aps, a Danish company 
+(CVR: 45773078), and is subject to Danish and EU law where applicable.

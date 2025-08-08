@@ -1,0 +1,567 @@
+# 🚀 Production Values for Loki AI Helm Chart
+# Optimized for enterprise deployment with high availability and security
+
+# ===== GLOBAL CONFIGURATION =====
+global:
+  environment: production
+  domain: loki.company.com
+  registry: ghcr.io/loki-ai
+  imageTag: "0.2.0"
+  
+# ===== APPLICATION =====
+replicaCount: 5  # High availability
+
+image:
+  repository: ghcr.io/loki-ai/loki
+  pullPolicy: IfNotPresent
+  tag: "0.2.0"
+
+imagePullSecrets:
+  - name: github-registry-secret
+
+nameOverride: "loki"
+fullnameOverride: "loki-ai"
+
+# ===== SERVICE ACCOUNT & RBAC =====
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT:role/LokiServiceRole"
+  name: "loki-ai"
+
+rbac:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources: ["pods", "services", "endpoints", "persistentvolumeclaims", "events", "configmaps", "secrets"]
+      verbs: ["get", "list", "watch"]
+    - apiGroups: ["apps"]
+      resources: ["deployments", "daemonsets", "replicasets", "statefulsets"]
+      verbs: ["get", "list", "watch"]
+    - apiGroups: ["monitoring.coreos.com"]
+      resources: ["servicemonitors"]
+      verbs: ["get", "create"]
+
+# ===== SECURITY =====
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+
+podSecurityPolicy:
+  enabled: true
+  annotations:
+    seccomp.security.alpha.kubernetes.io/allowedProfileNames: 'runtime/default'
+    seccomp.security.alpha.kubernetes.io/defaultProfileName: 'runtime/default'
+
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: nginx-ingress
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 9091
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+
+# ===== SERVICE & NETWORKING =====
+service:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: grpc
+      port: 8081
+      targetPort: 8081
+      protocol: TCP
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+      protocol: TCP
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "tcp"
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/rate-limit: "1000"
+    nginx.ingress.kubernetes.io/rate-limit-connections: "10"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/auth-tls-verify-client: "on"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+  hosts:
+    - host: loki.company.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: loki-tls
+      hosts:
+        - loki.company.com
+
+# ===== RESOURCES & AUTOSCALING =====
+resources:
+  limits:
+    cpu: 8000m
+    memory: 32Gi
+    nvidia.com/gpu: 2
+    ephemeral-storage: 50Gi
+  requests:
+    cpu: 4000m
+    memory: 16Gi
+    nvidia.com/gpu: 1
+    ephemeral-storage: 20Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+
+# Custom metrics for HPA
+customMetrics:
+  enabled: true
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: loki_cognitive_response_time_p95
+        target:
+          type: AverageValue
+          averageValue: "100m"  # 100ms
+    - type: Pods
+      pods:
+        metric:
+          name: loki_memory_cache_hit_rate
+        target:
+          type: AverageValue
+          averageValue: "0.95"  # 95% hit rate
+
+# ===== PLACEMENT & SCHEDULING =====
+nodeSelector:
+  node.kubernetes.io/instance-type: g5.4xlarge
+  kubernetes.io/arch: amd64
+  
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  - key: loki-ai/dedicated
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+            - key: app.kubernetes.io/name
+              operator: In
+              values:
+                - loki
+        topologyKey: kubernetes.io/hostname
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node.kubernetes.io/instance-type
+              operator: In
+              values:
+                - g5.xlarge
+                - g5.2xlarge
+                - g5.4xlarge
+                - g5.8xlarge
+
+# ===== LOKI CONFIGURATION =====
+loki:
+  # Production consciousness settings
+  consciousness:
+    level: "advanced"
+    introspection: false  # Disabled for performance
+    social_awareness: true
+    meta_cognition: true
+    
+  # Memory system configuration
+  memory:
+    max_memory_gb: 24
+    consolidation_interval: "30m"
+    enable_persistence: true
+    simd:
+      enable_avx512: true
+      vector_width: 512
+      
+  # Performance settings
+  performance:
+    max_concurrent_tasks: 16
+    enable_gpu: true
+    enable_simd: true
+    prefetch_enabled: true
+    optimization_target: "balanced"
+    
+  # Safety and validation
+  safety:
+    validation_level: "strict"
+    auto_approve_safe_actions: false
+    enable_audit_logging: true
+    max_action_timeout: "60s"
+    
+  # Tool integrations
+  tools:
+    parallel_execution: true
+    circuit_breaker_enabled: true
+    max_concurrent_tools: 8
+    
+  # Model configuration
+  models:
+    default_model: "llama3.1:8b"
+    enable_model_caching: true
+    max_model_size_gb: 20
+
+# ===== SECRETS MANAGEMENT =====
+secrets:
+  create: true
+  annotations:
+    reloader.stakater.com/match: "true"
+  external:
+    enabled: true
+    secretStore:
+      name: "aws-secrets-manager"
+      kind: "SecretStore"
+    data:
+      - secretKey: "OPENAI_API_KEY"
+        remoteRef:
+          key: "loki/production/openai"
+          property: "api_key"
+      - secretKey: "ANTHROPIC_API_KEY"
+        remoteRef:
+          key: "loki/production/anthropic"
+          property: "api_key"
+      - secretKey: "GITHUB_TOKEN"
+        remoteRef:
+          key: "loki/production/github"
+          property: "token"
+      - secretKey: "X_API_CREDENTIALS"
+        remoteRef:
+          key: "loki/production/twitter"
+          property: "credentials"
+
+# ===== PERSISTENCE =====
+persistence:
+  enabled: true
+  storageClass: "gp3-encrypted"
+  accessMode: ReadWriteOnce
+  size: 500Gi
+  annotations:
+    volume.beta.kubernetes.io/storage-provisioner: "ebs.csi.aws.com"
+  
+  # Model storage
+  models:
+    enabled: true
+    storageClass: "gp3-encrypted"
+    size: 1Ti
+    mountPath: /models
+    
+  # Memory system storage
+  memory:
+    enabled: true
+    storageClass: "gp3-encrypted"
+    size: 200Gi
+    mountPath: /data/memory
+    
+  # Backup storage
+  backup:
+    enabled: true
+    storageClass: "s3-backup"
+    size: 100Gi
+    schedule: "0 2 * * *"  # Daily at 2 AM
+
+# ===== DATABASE =====
+postgresql:
+  enabled: true
+  global:
+    postgresql:
+      auth:
+        postgresPassword: "CHANGE_ME_IN_PRODUCTION"
+        database: "loki_production"
+        username: "loki"
+        password: "CHANGE_ME_IN_PRODUCTION"
+  primary:
+    persistence:
+      enabled: true
+      storageClass: "gp3-encrypted"
+      size: 200Gi
+    resources:
+      limits:
+        memory: 8Gi
+        cpu: 4000m
+      requests:
+        memory: 4Gi
+        cpu: 2000m
+    pgHBAConf: |
+      local all all trust
+      host all all 127.0.0.1/32 md5
+      host all all ::1/128 md5
+      host all all 10.0.0.0/8 md5
+      hostssl all all 0.0.0.0/0 md5
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+# ===== REDIS =====
+redis:
+  enabled: true
+  auth:
+    enabled: true
+    password: "CHANGE_ME_IN_PRODUCTION"
+  architecture: replication
+  replica:
+    replicaCount: 2
+  master:
+    persistence:
+      enabled: true
+      storageClass: "gp3"
+      size: 50Gi
+    resources:
+      limits:
+        memory: 4Gi
+        cpu: 2000m
+      requests:
+        memory: 2Gi
+        cpu: 1000m
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+# ===== MONITORING =====
+monitoring:
+  enabled: true
+  
+  # Prometheus ServiceMonitor
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    scrapeTimeout: 10s
+    path: /metrics
+    labels:
+      release: prometheus
+    metricRelabelings:
+      - sourceLabels: [__name__]
+        regex: 'go_.*'
+        action: drop
+        
+  # Custom Prometheus rules
+  prometheusRule:
+    enabled: true
+    groups:
+      - name: loki.rules
+        rules:
+          - alert: LokiHighResponseTime
+            expr: histogram_quantile(0.95, rate(loki_cognitive_response_time_seconds_bucket[5m])) > 0.1
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Loki cognitive response time is high"
+              description: "95th percentile response time is {{ $value }}s"
+              
+          - alert: LokiMemoryCacheLowHitRate
+            expr: loki_memory_cache_hit_rate < 0.8
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Loki memory cache hit rate is low"
+              description: "Cache hit rate is {{ $value }}"
+              
+          - alert: LokiHighErrorRate
+            expr: rate(loki_errors_total[5m]) > 0.1
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Loki error rate is high"
+              description: "Error rate is {{ $value }} errors/second"
+
+# ===== GRAFANA DASHBOARDS =====
+grafana:
+  enabled: true
+  adminPassword: "CHANGE_ME_IN_PRODUCTION"
+  persistence:
+    enabled: true
+    storageClass: "gp3"
+    size: 10Gi
+  resources:
+    limits:
+      memory: 2Gi
+      cpu: 1000m
+    requests:
+      memory: 1Gi
+      cpu: 500m
+  
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: 'loki'
+          orgId: 1
+          folder: 'Loki AI'
+          type: file
+          disableDeletion: false
+          updateIntervalSeconds: 10
+          options:
+            path: /var/lib/grafana/dashboards
+            
+  dashboards:
+    loki:
+      loki-overview:
+        file: dashboards/loki-overview.json
+      loki-cognitive:
+        file: dashboards/loki-cognitive.json
+      loki-performance:
+        file: dashboards/loki-performance.json
+
+# ===== HEALTH CHECKS =====
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+    scheme: HTTP
+  initialDelaySeconds: 90
+  periodSeconds: 30
+  timeoutSeconds: 15
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+    scheme: HTTP
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 10
+  failureThreshold: 3
+  successThreshold: 1
+
+startupProbe:
+  httpGet:
+    path: /health
+    port: http
+    scheme: HTTP
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 10
+  failureThreshold: 30
+  successThreshold: 1
+
+# ===== ENVIRONMENT VARIABLES =====
+env:
+  - name: RUST_LOG
+    value: "warn,loki=info"
+  - name: LOKI_ENV
+    value: "production"
+  - name: LOKI_PRODUCTION
+    value: "true"
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "http://jaeger-collector:14268/api/traces"
+  - name: LOKI_TELEMETRY_ENABLED
+    value: "true"
+
+# ===== BACKUP & DISASTER RECOVERY =====
+backup:
+  enabled: true
+  schedule: "0 3 * * *"  # Daily at 3 AM
+  retention: "30d"
+  destinations:
+    - type: s3
+      bucket: "loki-production-backups"
+      region: "us-east-1"
+    - type: gcs
+      bucket: "loki-production-backups-gcs"
+  
+velero:
+  enabled: true
+  schedules:
+    daily:
+      schedule: "0 4 * * *"
+      template:
+        ttl: "720h"  # 30 days
+        includedNamespaces:
+          - loki-production
+
+# ===== CHAOS ENGINEERING =====
+chaosengineering:
+  enabled: false  # Enable in staging first
+  litmus:
+    enabled: false
+    experiments:
+      - name: pod-delete
+        schedule: "0 2 * * 1"  # Monday 2 AM
+      - name: cpu-hog
+        schedule: "0 2 * * 3"  # Wednesday 2 AM
+      - name: memory-hog
+        schedule: "0 2 * * 5"  # Friday 2 AM

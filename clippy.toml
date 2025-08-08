@@ -1,0 +1,33 @@
+# Clippy configuration for Loki AI - Rust 2025 Standards
+
+# Enforce strict coding standards
+warn-on-all-wildcard-imports = true
+disallowed-names = ["foo", "bar", "baz", "quux", "test", "tmp", "temp"]
+
+# Cognitive complexity and readability
+cognitive-complexity-threshold = 25
+too-many-lines-threshold = 80
+too-many-arguments-threshold = 6
+single-char-binding-names-threshold = 3
+
+# Type system strictness
+type-complexity-threshold = 200
+pass-by-value-size-limit = 128
+
+# Memory and performance
+array-size-threshold = 256
+enum-variant-size-threshold = 128
+vec-box-size-threshold = 8192
+large-error-threshold = 512
+
+# Documentation requirements
+missing-docs-in-crate-items = true
+
+# API design
+avoid-breaking-exported-api = true
+
+# MSRV (Minimum Supported Rust Version) - Rust 2025
+msrv = "1.83.0"
+
+# Specific to cognitive architecture
+max-trait-bounds = 5

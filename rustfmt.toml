@@ -1,0 +1,55 @@
+# Rust formatting configuration for codelite
+
+# Use verbose diffs
+verbose_diff = true
+
+# Maximum width of each line
+max_width = 100
+
+# Ideal width of each line
+comment_width = 80
+wrap_comments = true
+
+# Use field initialize shorthand if possible
+use_field_init_shorthand = true
+
+# Use small heuristics
+use_small_heuristics = "Max"
+
+# Imports
+imports_granularity = "Module"
+imports_layout = "HorizontalVertical"
+group_imports = "StdExternalCrate"
+
+# Reorder impl items
+reorder_impl_items = true
+
+# Format code in doc comments
+format_code_in_doc_comments = true
+
+# Format strings
+format_strings = true
+
+# Format macro matchers
+format_macro_matchers = true
+
+# Format macro bodies
+format_macro_bodies = true
+
+# Normalize comments
+normalize_comments = true
+
+# Normalize doc attributes
+normalize_doc_attributes = true
+
+# Report fixme items
+report_fixme = "Always"
+
+# Report todo items
+report_todo = "Always"
+
+# Edition
+edition = "2021"
+
+# Version
+version = "Two" 

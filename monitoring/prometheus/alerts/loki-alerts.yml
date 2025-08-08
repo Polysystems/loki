@@ -1,0 +1,402 @@
+# 🚨 Loki AI Production Alerting Rules
+# Comprehensive monitoring for autonomous AI system
+
+groups:
+  # ===== SYSTEM HEALTH ALERTS =====
+  - name: loki.system.health
+    interval: 30s
+    rules:
+      - alert: LokiInstanceDown
+        expr: up{job="loki"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: system
+          team: platform
+        annotations:
+          summary: "Loki AI instance is down"
+          description: "Loki AI instance {{ $labels.instance }} has been down for more than 1 minute"
+
+      - alert: LokiHighRestartRate
+        expr: rate(kube_pod_container_status_restarts_total{pod=~"loki-.*"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+          team: platform
+        annotations:
+          summary: "Loki AI pod restart rate is high"
+          description: "Pod {{ $labels.pod }} is restarting at a rate of {{ $value }} restarts/minute"
+
+      - alert: LokiPodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total{pod=~"loki-.*"}[15m]) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+          component: system
+          team: platform
+        annotations:
+          summary: "Loki AI pod is crash looping"
+          description: "Pod {{ $labels.pod }} is crash looping with restart rate {{ $value }}"
+
+  # ===== COGNITIVE PERFORMANCE ALERTS =====
+  - name: loki.cognitive.performance
+    interval: 15s
+    rules:
+      - alert: LokiCognitiveHighLatency
+        expr: histogram_quantile(0.95, rate(loki_cognitive_response_time_seconds_bucket[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          component: cognitive
+          team: ai-platform
+        annotations:
+          summary: "Loki cognitive response time is high"
+          description: "95th percentile cognitive response time is {{ $value }}s (threshold: 100ms)"
+          impact: "Users experiencing slow AI responses"
+          action: "Check cognitive processing pipeline and resource allocation"
+
+      - alert: LokiCognitiveCriticalLatency
+        expr: histogram_quantile(0.95, rate(loki_cognitive_response_time_seconds_bucket[5m])) > 0.5
+        for: 1m
+        labels:
+          severity: critical
+          component: cognitive
+          team: ai-platform
+        annotations:
+          summary: "Loki cognitive response time is critically high"
+          description: "95th percentile cognitive response time is {{ $value }}s (critical threshold: 500ms)"
+          impact: "Severe degradation in AI performance"
+          action: "Immediate investigation required - check GPU utilization and memory pressure"
+
+      - alert: LokiCognitiveErrorRate
+        expr: rate(loki_cognitive_errors_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          component: cognitive
+          team: ai-platform
+        annotations:
+          summary: "Loki cognitive error rate is high"
+          description: "Cognitive error rate is {{ $value }} errors/second (threshold: 0.05/s)"
+          impact: "Increased failure rate in AI processing"
+
+      - alert: LokiCognitiveCriticalErrorRate
+        expr: rate(loki_cognitive_errors_total[5m]) > 0.2
+        for: 1m
+        labels:
+          severity: critical
+          component: cognitive
+          team: ai-platform
+        annotations:
+          summary: "Loki cognitive error rate is critically high"
+          description: "Cognitive error rate is {{ $value }} errors/second (critical threshold: 0.2/s)"
+          impact: "Critical failure rate in AI processing"
+          action: "Immediate investigation - check model health and resource constraints"
+
+      - alert: LokiCognitiveConfidenceLow
+        expr: avg(loki_cognitive_confidence_score) < 0.7
+        for: 10m
+        labels:
+          severity: warning
+          component: cognitive
+          team: ai-platform
+        annotations:
+          summary: "Loki cognitive confidence is consistently low"
+          description: "Average confidence score is {{ $value }} (threshold: 0.7)"
+          impact: "AI responses may be less reliable"
+          action: "Review model performance and consider retraining"
+
+  # ===== MEMORY SYSTEM ALERTS =====
+  - name: loki.memory.performance
+    interval: 30s
+    rules:
+      - alert: LokiMemoryCacheLowHitRate
+        expr: loki_memory_cache_hit_rate < 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: memory
+          team: ai-platform
+        annotations:
+          summary: "Loki memory cache hit rate is low"
+          description: "Memory cache hit rate is {{ $value }} (threshold: 80%)"
+          impact: "Increased latency due to cache misses"
+          action: "Consider increasing cache size or optimizing memory patterns"
+
+      - alert: LokiMemoryCacheCriticalHitRate
+        expr: loki_memory_cache_hit_rate < 0.6
+        for: 2m
+        labels:
+          severity: critical
+          component: memory
+          team: ai-platform
+        annotations:
+          summary: "Loki memory cache hit rate is critically low"
+          description: "Memory cache hit rate is {{ $value }} (critical threshold: 60%)"
+          impact: "Severe performance degradation"
+          action: "Immediate cache optimization required"
+
+      - alert: LokiMemoryHighPressure
+        expr: loki_memory_usage_percent > 90
+        for: 3m
+        labels:
+          severity: warning
+          component: memory
+          team: platform
+        annotations:
+          summary: "Loki memory usage is high"
+          description: "Memory usage is {{ $value }}% (threshold: 90%)"
+          impact: "Risk of memory exhaustion"
+          action: "Monitor for memory leaks and consider scaling"
+
+      - alert: LokiMemoryCriticalPressure
+        expr: loki_memory_usage_percent > 95
+        for: 1m
+        labels:
+          severity: critical
+          component: memory
+          team: platform
+        annotations:
+          summary: "Loki memory usage is critically high"
+          description: "Memory usage is {{ $value }}% (critical threshold: 95%)"
+          impact: "Imminent risk of OOM kill"
+          action: "Immediate action required - restart pod or scale up"
+
+      - alert: LokiMemoryLeakDetected
+        expr: increase(loki_memory_allocated_bytes[1h]) > 1e9 and rate(loki_memory_allocated_bytes[5m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: memory
+          team: ai-platform
+        annotations:
+          summary: "Potential memory leak detected in Loki"
+          description: "Memory allocation increased by {{ $value }} bytes in the last hour"
+          impact: "Progressive memory consumption may lead to instability"
+          action: "Investigate memory allocation patterns and potential leaks"
+
+  # ===== TOOL INTEGRATION ALERTS =====
+  - name: loki.tools.integration
+    interval: 30s
+    rules:
+      - alert: LokiToolExecutionFailures
+        expr: rate(loki_tool_execution_errors_total[5m]) > 0.1
+        for: 3m
+        labels:
+          severity: warning
+          component: tools
+          team: integrations
+        annotations:
+          summary: "High tool execution failure rate"
+          description: "Tool execution error rate is {{ $value }} errors/second for tool {{ $labels.tool }}"
+          impact: "Reduced functionality in external integrations"
+
+      - alert: LokiToolExecutionLatency
+        expr: histogram_quantile(0.95, rate(loki_tool_execution_duration_seconds_bucket[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: tools
+          team: integrations
+        annotations:
+          summary: "Tool execution latency is high"
+          description: "95th percentile tool execution time is {{ $value }}s for tool {{ $labels.tool }}"
+          impact: "Slow external tool responses"
+
+      - alert: LokiCircuitBreakerOpen
+        expr: loki_circuit_breaker_state{state="open"} == 1
+        for: 1m
+        labels:
+          severity: warning
+          component: tools
+          team: integrations
+        annotations:
+          summary: "Circuit breaker is open for tool {{ $labels.tool }}"
+          description: "Circuit breaker has been open for tool {{ $labels.tool }} for over 1 minute"
+          impact: "Tool {{ $labels.tool }} is temporarily unavailable"
+          action: "Check external service health and circuit breaker configuration"
+
+  # ===== RESOURCE UTILIZATION ALERTS =====
+  - name: loki.resources.utilization
+    interval: 30s
+    rules:
+      - alert: LokiHighCPUUsage
+        expr: rate(container_cpu_usage_seconds_total{pod=~"loki-.*"}[5m]) * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: resources
+          team: platform
+        annotations:
+          summary: "Loki CPU usage is high"
+          description: "CPU usage is {{ $value }}% on pod {{ $labels.pod }}"
+          impact: "Performance degradation due to CPU constraints"
+
+      - alert: LokiCriticalCPUUsage
+        expr: rate(container_cpu_usage_seconds_total{pod=~"loki-.*"}[5m]) * 100 > 95
+        for: 5m
+        labels:
+          severity: critical
+          component: resources
+          team: platform
+        annotations:
+          summary: "Loki CPU usage is critically high"
+          description: "CPU usage is {{ $value }}% on pod {{ $labels.pod }}"
+          impact: "Severe performance degradation"
+          action: "Scale up or optimize CPU-intensive operations"
+
+      - alert: LokiGPUMemoryHigh
+        expr: nvidia_ml_py_gpu_memory_used_bytes / nvidia_ml_py_gpu_memory_total_bytes * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+          component: gpu
+          team: ai-platform
+        annotations:
+          summary: "GPU memory usage is high"
+          description: "GPU {{ $labels.gpu }} memory usage is {{ $value }}%"
+          impact: "Risk of GPU memory exhaustion"
+
+      - alert: LokiGPUUtilizationLow
+        expr: nvidia_ml_py_gpu_utilization < 20
+        for: 30m
+        labels:
+          severity: info
+          component: gpu
+          team: ai-platform
+        annotations:
+          summary: "GPU utilization is consistently low"
+          description: "GPU {{ $labels.gpu }} utilization is {{ $value }}%"
+          impact: "Underutilized GPU resources"
+          action: "Consider optimizing GPU usage or scaling down"
+
+  # ===== SOCIAL INTEGRATION ALERTS =====
+  - name: loki.social.integration
+    interval: 60s
+    rules:
+      - alert: LokiSocialPostingErrors
+        expr: rate(loki_social_post_errors_total[10m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: social
+          team: integrations
+        annotations:
+          summary: "High error rate in social media posting"
+          description: "Social posting error rate is {{ $value }} errors/minute for platform {{ $labels.platform }}"
+          impact: "Reduced social media presence"
+
+      - alert: LokiSocialRateLimitHit
+        expr: loki_social_rate_limit_exceeded_total > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: social
+          team: integrations
+        annotations:
+          summary: "Social media rate limit exceeded"
+          description: "Rate limit exceeded for platform {{ $labels.platform }}"
+          impact: "Temporary reduction in social media activity"
+          action: "Review posting frequency and rate limit policies"
+
+  # ===== SECURITY ALERTS =====
+  - name: loki.security.monitoring
+    interval: 60s
+    rules:
+      - alert: LokiUnauthorizedAccess
+        expr: rate(loki_http_requests_total{code=~"401|403"}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          component: security
+          team: security
+        annotations:
+          summary: "High rate of unauthorized access attempts"
+          description: "Rate of unauthorized requests is {{ $value }} requests/second"
+          impact: "Potential security threat"
+          action: "Review access logs and security policies"
+
+      - alert: LokiAbnormalBehavior
+        expr: loki_safety_validation_rejections_total > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: safety
+          team: ai-safety
+        annotations:
+          summary: "High number of safety validation rejections"
+          description: "{{ $value }} actions rejected by safety validator in 5 minutes"
+          impact: "Unusual AI behavior detected"
+          action: "Review AI decision patterns and safety policies"
+
+  # ===== DATA PERSISTENCE ALERTS =====
+  - name: loki.persistence.health
+    interval: 120s
+    rules:
+      - alert: LokiDiskSpaceHigh
+        expr: (1 - (kubelet_volume_stats_available_bytes{persistentvolumeclaim=~"loki-.*"} / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"loki-.*"})) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          component: storage
+          team: platform
+        annotations:
+          summary: "Disk space usage is high"
+          description: "Disk usage is {{ $value }}% for PVC {{ $labels.persistentvolumeclaim }}"
+          impact: "Risk of storage exhaustion"
+
+      - alert: LokiDiskSpaceCritical
+        expr: (1 - (kubelet_volume_stats_available_bytes{persistentvolumeclaim=~"loki-.*"} / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"loki-.*"})) * 100 > 95
+        for: 1m
+        labels:
+          severity: critical
+          component: storage
+          team: platform
+        annotations:
+          summary: "Disk space usage is critically high"
+          description: "Disk usage is {{ $value }}% for PVC {{ $labels.persistentvolumeclaim }}"
+          impact: "Imminent risk of storage exhaustion"
+          action: "Immediate action required - expand storage or clean up data"
+
+      - alert: LokiDatabaseConnectionFailures
+        expr: rate(loki_database_connection_errors_total[5m]) > 0.1
+        for: 3m
+        labels:
+          severity: warning
+          component: database
+          team: platform
+        annotations:
+          summary: "Database connection failures detected"
+          description: "Database connection error rate is {{ $value }} errors/second"
+          impact: "Risk of data persistence issues"
+
+  # ===== AUTONOMOUS OPERATION ALERTS =====
+  - name: loki.autonomous.operations
+    interval: 300s  # 5 minutes
+    rules:
+      - alert: LokiAutonomousOperationStalled
+        expr: time() - loki_last_autonomous_operation_timestamp > 7200  # 2 hours
+        for: 10m
+        labels:
+          severity: warning
+          component: autonomous
+          team: ai-platform
+        annotations:
+          summary: "Autonomous operations have stalled"
+          description: "No autonomous operations detected for {{ $value }} seconds"
+          impact: "Reduced autonomous functionality"
+          action: "Check autonomous loop and decision engine"
+
+      - alert: LokiSelfModificationErrors
+        expr: rate(loki_self_modification_errors_total[1h]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          component: autonomous
+          team: ai-safety
+        annotations:
+          summary: "Self-modification errors detected"
+          description: "Self-modification error rate is {{ $value }} errors/hour"
+          impact: "Reduced self-improvement capabilities"
+          action: "Review self-modification logic and safety constraints"

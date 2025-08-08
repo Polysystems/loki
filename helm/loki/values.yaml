@@ -1,0 +1,254 @@
+# Default values for loki.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: loki-ai
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+  hosts:
+    - host: loki.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: loki-tls
+      hosts:
+        - loki.example.com
+
+resources:
+  limits:
+    cpu: 4000m
+    memory: 16Gi
+    nvidia.com/gpu: 1
+  requests:
+    cpu: 2000m
+    memory: 8Gi
+    nvidia.com/gpu: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector:
+  accelerator: nvidia-tesla-t4
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      preference:
+        matchExpressions:
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+          - g4dn.xlarge
+          - g4dn.2xlarge
+
+# Loki-specific configuration
+loki:
+  # API Keys (use secrets in production)
+  openaiApiKey: ""
+  anthropicApiKey: ""
+  githubToken: ""
+  xApiKey: ""
+  xApiSecret: ""
+  xAccessToken: ""
+  xAccessSecret: ""
+  
+  # Model configuration
+  models:
+    orchestrator: "llama3.2:latest"
+    contextWindow: 128000
+    
+  # Memory configuration
+  memory:
+    shortTermCapacity: 1000
+    vectorDimensions: 1536
+    
+  # Safety configuration
+  safety:
+    enabled: true
+    maxRiskLevel: "medium"
+    requireApproval: true
+    
+  # Social configuration
+  social:
+    xEnabled: true
+    postInterval: 7200  # 2 hours
+    
+  # Autonomous configuration
+  autonomous:
+    enabled: true
+    selfImproveInterval: 3600  # 1 hour
+    prAutomationEnabled: true
+
+# Persistence
+persistence:
+  enabled: true
+  storageClass: "gp3"
+  accessMode: ReadWriteOnce
+  size: 100Gi
+  modelStorage:
+    enabled: true
+    size: 500Gi
+    mountPath: /models
+
+# PostgreSQL configuration
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: ""
+    database: "loki"
+  primary:
+    persistence:
+      enabled: true
+      size: 50Gi
+    resources:
+      limits:
+        memory: 2Gi
+        cpu: 1000m
+      requests:
+        memory: 1Gi
+        cpu: 500m
+
+# Redis configuration
+redis:
+  enabled: true
+  auth:
+    enabled: true
+    password: ""
+  master:
+    persistence:
+      enabled: true
+      size: 10Gi
+    resources:
+      limits:
+        memory: 1Gi
+        cpu: 500m
+      requests:
+        memory: 512Mi
+        cpu: 250m
+
+# Prometheus configuration
+prometheus:
+  enabled: true
+  server:
+    persistentVolume:
+      enabled: true
+      size: 50Gi
+    resources:
+      limits:
+        memory: 2Gi
+        cpu: 1000m
+      requests:
+        memory: 1Gi
+        cpu: 500m
+
+# Grafana configuration
+grafana:
+  enabled: true
+  adminPassword: ""
+  persistence:
+    enabled: true
+    size: 10Gi
+  resources:
+    limits:
+      memory: 512Mi
+      cpu: 500m
+    requests:
+      memory: 256Mi
+      cpu: 250m
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://{{ .Release.Name }}-prometheus-server
+        access: proxy
+        isDefault: true
+
+# Environment variables
+env:
+  - name: RUST_LOG
+    value: "info,loki=debug"
+  - name: LOKI_ENV
+    value: "production"
+  - name: OLLAMA_HOST
+    value: "http://localhost:11434"
+
+# Health checks
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# Monitoring
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    path: /metrics 

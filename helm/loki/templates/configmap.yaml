@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "loki.fullname" . }}-config
+  labels:
+    {{- include "loki.labels" . | nindent 4 }}
+data:
+  loki.yaml: |
+    # Loki configuration
+    orchestrator:
+      model: {{ .Values.loki.models.orchestrator }}
+      context_window: {{ .Values.loki.models.contextWindow }}
+    
+    memory:
+      short_term_capacity: {{ .Values.loki.memory.shortTermCapacity }}
+      vector_dimensions: {{ .Values.loki.memory.vectorDimensions }}
+    
+    safety:
+      enabled: {{ .Values.loki.safety.enabled }}
+      max_risk_level: {{ .Values.loki.safety.maxRiskLevel }}
+      require_approval: {{ .Values.loki.safety.requireApproval }}
+    
+    social:
+      x_enabled: {{ .Values.loki.social.xEnabled }}
+      post_interval: {{ .Values.loki.social.postInterval }}
+    
+    autonomous:
+      enabled: {{ .Values.loki.autonomous.enabled }}
+      self_improve_interval: {{ .Values.loki.autonomous.selfImproveInterval }}
+      pr_automation_enabled: {{ .Values.loki.autonomous.prAutomationEnabled }} 

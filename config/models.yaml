@@ -1,0 +1,291 @@
+# Loki Model Orchestration Configuration
+# This file defines how Loki manages and routes between multiple AI models
+
+models:
+  local:
+    # DeepSeek Coder v2 - Primary code generation specialist
+    deepseek_coder_v2:
+      ollama_name: "deepseek-coder:6.7b-instruct"
+      specializations: 
+        - CodeGeneration
+        - CodeReview
+      priority: 1
+      auto_load: true
+      quantization: Q5_K_M
+      gpu_layers: 32
+      context_window: 16384
+      max_concurrent_requests: 3
+      temperature: 0.1
+      top_p: 0.95
+      top_k: 40
+      capability_overrides:
+        code_generation: 0.95
+        code_review: 0.85
+        reasoning: 0.75
+        creative_writing: 0.3
+        data_analysis: 0.6
+        mathematical_computation: 0.7
+        language_translation: 0.4
+        context_window: 16384
+        max_tokens_per_second: 50.0
+        supports_streaming: true
+        supports_function_calling: false
+
+    # MagiCoder 7B - Fast code completion
+    magicoder_7b:
+      ollama_name: "magicoder:7b"
+      specializations:
+        - CodeGeneration
+      priority: 2
+      auto_load: true
+      quantization: Q4_K_M
+      gpu_layers: 28
+      context_window: 8192
+      max_concurrent_requests: 5
+      temperature: 0.1
+      top_p: 0.9
+      top_k: 50
+      capability_overrides:
+        code_generation: 0.85
+        code_review: 0.7
+        reasoning: 0.6
+        creative_writing: 0.2
+        data_analysis: 0.5
+        mathematical_computation: 0.6
+        language_translation: 0.3
+        context_window: 8192
+        max_tokens_per_second: 75.0
+        supports_streaming: true
+        supports_function_calling: false
+
+    # WizardCoder 34B - Complex reasoning and large code projects
+    wizardcoder_34b:
+      ollama_name: "wizardcoder:34b"
+      specializations:
+        - CodeGeneration
+        - LogicalReasoning
+      priority: 3
+      auto_load: false  # Large model, load only when needed
+      quantization: Q3_K_M
+      gpu_layers: 16
+      context_window: 8192
+      max_concurrent_requests: 2
+      temperature: 0.2
+      top_p: 0.95
+      top_k: 40
+      capability_overrides:
+        code_generation: 0.9
+        code_review: 0.85
+        reasoning: 0.85
+        creative_writing: 0.4
+        data_analysis: 0.7
+        mathematical_computation: 0.8
+        language_translation: 0.5
+        context_window: 8192
+        max_tokens_per_second: 25.0
+        supports_streaming: true
+        supports_function_calling: false
+
+    # Devstral (Codestral) - Code review and analysis specialist
+    devstral:
+      ollama_name: "codestral:22b"
+      specializations:
+        - CodeGeneration
+        - CodeReview
+        - DataAnalysis
+      priority: 2
+      auto_load: false
+      quantization: Q4_K_M
+      gpu_layers: 24
+      context_window: 32768
+      max_concurrent_requests: 2
+      temperature: 0.15
+      top_p: 0.9
+      top_k: 40
+      capability_overrides:
+        code_generation: 0.88
+        code_review: 0.95
+        reasoning: 0.8
+        creative_writing: 0.4
+        data_analysis: 0.85
+        mathematical_computation: 0.75
+        language_translation: 0.6
+        context_window: 32768
+        max_tokens_per_second: 35.0
+        supports_streaming: true
+        supports_function_calling: false
+
+    # Llama 3.2 - Lightweight general purpose model (fallback)
+    llama3_2_3b:
+      ollama_name: "llama3.2:3b-instruct"
+      specializations:
+        - GeneralPurpose
+      priority: 1  # High priority for general chat
+      auto_load: true
+      quantization: Q4_K_M
+      gpu_layers: 16
+      context_window: 2048
+      max_concurrent_requests: 8
+      temperature: 0.7
+      top_p: 0.9
+      top_k: 40
+      capability_overrides:
+        code_generation: 0.5
+        code_review: 0.4
+        reasoning: 0.6
+        creative_writing: 0.7
+        data_analysis: 0.5
+        mathematical_computation: 0.5
+        language_translation: 0.6
+        context_window: 2048
+        max_tokens_per_second: 100.0
+        supports_streaming: true
+        supports_function_calling: false
+
+  api:
+    # Claude 4 - Primary orchestrator for complex reasoning
+    claude_4:
+      provider: "anthropic"
+      model: "claude-3-5-sonnet-20241022"
+      role: "orchestrator"
+      specializations:
+        - LogicalReasoning
+        - CreativeWriting
+        - GeneralPurpose
+        - DataAnalysis
+      priority: 1
+      cost_per_token: 0.000015
+      capability_overrides:
+        code_generation: 0.85
+        code_review: 0.9
+        reasoning: 0.95
+        creative_writing: 0.95
+        data_analysis: 0.9
+        mathematical_computation: 0.85
+        language_translation: 0.9
+        context_window: 200000
+        max_tokens_per_second: 100.0
+        supports_streaming: true
+        supports_function_calling: true
+
+    # GPT-4 - Alternative API provider
+    gpt_4:
+      provider: "openai"
+      model: "gpt-4-turbo-preview"
+      role: "specialist"
+      specializations:
+        - LogicalReasoning
+        - CreativeWriting
+        - GeneralPurpose
+      priority: 2
+      cost_per_token: 0.00001
+      capability_overrides:
+        code_generation: 0.8
+        code_review: 0.85
+        reasoning: 0.9
+        creative_writing: 0.9
+        data_analysis: 0.85
+        mathematical_computation: 0.9
+        language_translation: 0.85
+        context_window: 128000
+        max_tokens_per_second: 80.0
+        supports_streaming: true
+        supports_function_calling: true
+
+orchestration:
+  default_strategy: CapabilityBased
+  fallback_enabled: true
+  prefer_local: true
+  ensemble_mode: ~  # null/none for now
+  
+  # Task-specific routing preferences
+  task_routing:
+    code_generation:
+      primary: ["deepseek_coder_v2", "magicoder_7b"]
+      fallback: ["devstral", "claude_4"]
+      require_streaming: false
+      max_cost_cents: 5.0
+    
+    code_review:
+      primary: ["devstral", "deepseek_coder_v2"]
+      fallback: ["claude_4"]
+      require_streaming: false
+      max_cost_cents: 3.0
+    
+    logical_reasoning:
+      primary: ["claude_4"]
+      fallback: ["wizardcoder_34b", "gpt_4"]
+      require_streaming: false
+      max_cost_cents: 10.0
+    
+    creative_writing:
+      primary: ["claude_4", "gpt_4"]
+      fallback: []
+      require_streaming: false
+      max_cost_cents: 8.0
+    
+    data_analysis:
+      primary: ["claude_4", "devstral"]
+      fallback: ["wizardcoder_34b"]
+      require_streaming: false
+      max_cost_cents: 6.0
+    
+    general_chat:
+      primary: ["llama3_2_3b", "deepseek_coder_v2"]
+      fallback: ["claude_4", "gpt_4"]
+      require_streaming: false
+      max_cost_cents: 2.0
+  
+  # Performance thresholds
+  quality_threshold: 0.7
+  latency_threshold_ms: 5000
+  cost_threshold_cents: 10.0
+
+resource_management:
+  auto_scaling: true
+  memory_threshold: 0.85  # 85% of available RAM
+  gpu_memory_threshold: 0.90  # 90% of available GPU memory
+  load_balancing: "least_connections"
+  
+  # Model loading behavior
+  preload_priority_models: true
+  unload_idle_models: true
+  idle_timeout_minutes: 30
+
+hardware_requirements:
+  minimum:
+    ram_gb: 16.0
+    gpu_memory_gb: 6.0
+    cpu_cores: 4
+    storage_gb: 50.0
+  
+  recommended:
+    ram_gb: 32.0
+    gpu_memory_gb: 12.0
+    cpu_cores: 8
+    storage_gb: 100.0
+  
+  # Optional overrides
+  force_cpu_only: ~  # null - auto-detect
+  max_gpu_memory_gb: ~  # null - use all available
+  max_concurrent_models: 5
+
+# Configuration Notes:
+# 
+# 1. Local models will be automatically loaded based on available resources
+# 2. API models are used when local models are unavailable or for specific tasks
+# 3. The orchestrator will route tasks based on capability scores and current load
+# 4. Costs are tracked per request and compared against thresholds
+# 5. Models can be added/removed without code changes
+#
+# Performance Tips:
+# - Use Q4_K_M quantization for balance of speed and quality
+# - Reduce gpu_layers if running out of GPU memory
+# - Increase max_concurrent_requests for high-throughput scenarios
+# - Set auto_load: false for large models to save resources
+#
+# Example Usage:
+# - Simple code completion: Routes to magicoder_7b (fast, local)
+# - Complex code review: Routes to devstral or deepseek_coder_v2
+# - Architectural decisions: Routes to claude_4 (reasoning specialist)
+# - Creative documentation: Routes to claude_4 or gpt_4
