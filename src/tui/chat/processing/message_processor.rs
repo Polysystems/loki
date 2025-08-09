@@ -191,8 +191,33 @@ impl MessageProcessor {
             }).await;
         }
         
-        // 1. Check for code generation requests and route to editor
-        if self.looks_like_code_generation(content) {
+        // 1. Check for direct tool/agent execution requests first (higher priority)
+        // These should be executed immediately, not sent to editor
+        if self.looks_like_direct_execution(content) {
+            tracing::info!("🔧 Detected direct tool/agent execution request: {}", content);
+            
+            // Try to execute the tool request directly
+            match self.execute_tool_request(content, chat_id).await {
+                Ok(Some(result)) => {
+                    // Send the tool execution result
+                    self.response_tx.send(result).await?;
+                    return Ok(());
+                }
+                Ok(None) => {
+                    // Tool request recognized but couldn't be executed directly
+                    // Continue to model for interpretation
+                    tracing::info!("Tool request needs model interpretation");
+                }
+                Err(e) => {
+                    // Log error but continue with model processing
+                    tracing::warn!("Tool execution failed: {}, falling back to model", e);
+                }
+            }
+        }
+        
+        // 2. Check for code generation requests and route to editor
+        // Only if it's specifically about creating/writing new code, not executing tools
+        if self.looks_like_code_generation(content) && !self.looks_like_direct_execution(content) {
             tracing::info!("📝 Detected code generation request: {}", content);
             
             // Route to editor through bridge
@@ -219,29 +244,6 @@ impl MessageProcessor {
                     Err(e) => {
                         tracing::warn!("Failed to open editor: {}", e);
                     }
-                }
-            }
-        }
-        
-        // 2. Check for direct tool requests and execute them
-        if self.looks_like_tool_request(content) {
-            tracing::info!("🔧 Detected tool request in user input: {}", content);
-            
-            // Try to execute the tool request
-            match self.execute_tool_request(content, chat_id).await {
-                Ok(Some(result)) => {
-                    // Send the tool execution result
-                    self.response_tx.send(result).await?;
-                    return Ok(());
-                }
-                Ok(None) => {
-                    // Tool request recognized but couldn't be executed directly
-                    // Continue to model for interpretation
-                    tracing::info!("Tool request needs model interpretation");
-                }
-                Err(e) => {
-                    // Log error but continue with model processing
-                    tracing::warn!("Tool execution failed: {}, falling back to model", e);
                 }
             }
         }
@@ -473,6 +475,45 @@ impl MessageProcessor {
         Ok(())
     }
     
+    /// Check if input looks like direct tool/agent execution (not code generation)
+    fn looks_like_direct_execution(&self, content: &str) -> bool {
+        let lower = content.to_lowercase();
+        
+        // Check for explicit agent/tool invocation patterns
+        if lower.starts_with("use ") || lower.starts_with("call ") || 
+           lower.starts_with("invoke ") || lower.starts_with("execute ") ||
+           lower.starts_with("run ") || lower.starts_with("agent:") ||
+           lower.starts_with("tool:") || lower.starts_with("/") {
+            return true;
+        }
+        
+        // Check for specific tool action patterns
+        let tool_patterns = [
+            "search for", "find files", "grep for", "look for",
+            "list files", "show files", "check status",
+            "run tests", "run build", "compile", "execute script",
+            "git status", "git diff", "git log", "commit",
+            "analyze code", "review code", "check syntax",
+            "open terminal", "run command", "shell command",
+        ];
+        
+        for pattern in &tool_patterns {
+            if lower.contains(pattern) {
+                return true;
+            }
+        }
+        
+        // Check if it's a shell command pattern (contains common shell commands)
+        let shell_commands = ["ls", "cd", "pwd", "cat", "grep", "find", "npm", "cargo", "python", "node"];
+        for cmd in &shell_commands {
+            if lower.split_whitespace().any(|word| word == *cmd) {
+                return true;
+            }
+        }
+        
+        false
+    }
+    
     /// Check if input looks like a tool request
     fn looks_like_tool_request(&self, content: &str) -> bool {
         let lower = content.to_lowercase();
@@ -537,15 +578,22 @@ impl MessageProcessor {
     fn looks_like_code_generation(&self, content: &str) -> bool {
         let lower = content.to_lowercase();
         
-        // Explicit code generation patterns
+        // Don't treat as code generation if it's a direct execution request
+        if self.looks_like_direct_execution(content) {
+            return false;
+        }
+        
+        // Explicit code generation patterns (for creating new code, not executing)
         let generation_patterns = [
-            "implement", "create a function", "write a function", "write code",
-            "generate code", "create code", "build a", "develop a",
-            "write a program", "create a program", "implement a",
-            "code for", "script for", "function to", "method to",
-            "class for", "module for", "component for",
+            "implement a function", "create a function", "write a function",
+            "implement a class", "create a class", "write a class",
+            "write code for", "generate code for", "create code for",
+            "build a component", "develop a feature", "design a system",
+            "write a program", "create a program", "implement a solution",
+            "code for me", "script for me", "function to do",
             "help me implement", "help me write", "help me create",
-            "show me how to", "example of", "template for",
+            "show me how to code", "example code for", "template for",
+            "can you write", "can you implement", "please write code",
         ];
         
         // Check for any generation pattern
@@ -1128,47 +1176,128 @@ You can also use natural language to request actions or paste code blocks to exe
         Ok(())
     }
     
-    /// Spawn a code agent for complex tasks
+    /// Analyze requirements to determine which types of agents are needed
+    fn analyze_requirements(&self, content: &str) -> Vec<crate::tui::chat::agents::code_agent::AgentRequirement> {
+        use crate::tui::chat::agents::code_agent::AgentRequirement;
+        
+        let mut requirements = Vec::new();
+        let lower = content.to_lowercase();
+        
+        // Check for frontend requirements
+        if lower.contains("frontend") || lower.contains("react") || lower.contains("typescript") ||
+           lower.contains("ui") || lower.contains("interface") || lower.contains("vue") ||
+           lower.contains("angular") || lower.contains("svelte") {
+            requirements.push(AgentRequirement::Frontend);
+        }
+        
+        // Check for backend requirements
+        if lower.contains("backend") || lower.contains("rust") || lower.contains("server") ||
+           lower.contains("api") || lower.contains("endpoint") || lower.contains("microservice") {
+            requirements.push(AgentRequirement::Backend);
+        }
+        
+        // Check for data processing/Python requirements
+        if lower.contains("python") || lower.contains("streaming") || lower.contains("data process") ||
+           lower.contains("ml") || lower.contains("machine learning") || lower.contains("pandas") {
+            requirements.push(AgentRequirement::DataProcessing);
+        }
+        
+        // Check for testing requirements
+        if lower.contains("test") || lower.contains("jest") || lower.contains("pytest") ||
+           lower.contains("unit test") || lower.contains("integration test") {
+            requirements.push(AgentRequirement::Testing);
+        }
+        
+        // Check for DevOps requirements
+        if lower.contains("docker") || lower.contains("kubernetes") || lower.contains("ci/cd") ||
+           lower.contains("deploy") || lower.contains("terraform") {
+            requirements.push(AgentRequirement::DevOps);
+        }
+        
+        // Check for database requirements
+        if lower.contains("database") || lower.contains("sql") || lower.contains("postgres") ||
+           lower.contains("mongodb") || lower.contains("redis") {
+            requirements.push(AgentRequirement::Database);
+        }
+        
+        // Check for mobile requirements
+        if lower.contains("mobile") || lower.contains("react native") || lower.contains("flutter") ||
+           lower.contains("ios") || lower.contains("android") {
+            requirements.push(AgentRequirement::Mobile);
+        }
+        
+        // If no specific requirements found, add a general agent
+        if requirements.is_empty() {
+            requirements.push(AgentRequirement::General);
+        }
+        
+        // Remove duplicates
+        requirements.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+        requirements.dedup();
+        
+        requirements
+    }
+    
+    /// Spawn multiple specialized agents based on requirements
+    async fn spawn_agents_for_requirements(
+        &self,
+        requirements: &str,
+        update_tx: mpsc::Sender<crate::tui::chat::agents::code_agent::AgentUpdate>,
+    ) -> Vec<Arc<crate::tui::chat::agents::code_agent::CodeAgent>> {
+        use crate::tui::chat::agents::code_agent::{CodeAgentFactory, CodeAgent};
+        
+        let agent_requirements = self.analyze_requirements(requirements);
+        let mut agents = Vec::new();
+        
+        tracing::info!("🎯 Detected {} agent requirements from user request", agent_requirements.len());
+        
+        for req in agent_requirements {
+            // Create specialized agent for this requirement
+            let agent = CodeAgentFactory::create_specialized_agent(req.clone(), update_tx.clone());
+            
+            // Set model orchestrator if available
+            let agent = if let Some(ref orchestrator) = self.model_orchestrator {
+                let mut agent = agent;
+                agent.set_model_orchestrator(orchestrator.clone());
+                agent
+            } else {
+                agent
+            };
+            
+            // Set editor bridge if available
+            let agent = if let Some(ref bridges) = self.bridges {
+                let mut agent = agent;
+                agent.set_editor_bridge(bridges.editor_bridge.clone());
+                agent
+            } else {
+                agent
+            };
+            
+            let agent = Arc::new(agent);
+            
+            // Notify about agent creation
+            let notification = AssistantResponseType::new_ai_message(
+                format!("🤖 {} spawned", agent.name()),
+                Some("agent-manager".to_string()),
+            );
+            let _ = self.response_tx.send(notification).await;
+            
+            tracing::info!("Spawned specialized agent: {}", agent.name());
+            agents.push(agent);
+        }
+        
+        agents
+    }
+    
+    /// Spawn a code agent for complex tasks (legacy - kept for compatibility)
     async fn spawn_code_agent(
         &self,
         requirements: &str,
         update_tx: mpsc::Sender<crate::tui::chat::agents::code_agent::AgentUpdate>,
     ) -> Option<Arc<crate::tui::chat::agents::code_agent::CodeAgent>> {
-        use crate::tui::chat::agents::code_agent::{CodeAgentFactory, CodeAgent};
-        
-        // Create agent through factory
-        let agent = CodeAgentFactory::create_agent(requirements, update_tx);
-        
-        // Set model orchestrator if available
-        let agent = if let Some(ref orchestrator) = self.model_orchestrator {
-            let mut agent = agent;
-            agent.set_model_orchestrator(orchestrator.clone());
-            agent
-        } else {
-            agent
-        };
-        
-        // Set editor bridge if available
-        let agent = if let Some(ref bridges) = self.bridges {
-            let mut agent = agent;
-            agent.set_editor_bridge(bridges.editor_bridge.clone());
-            agent
-        } else {
-            agent
-        };
-        
-        let agent = Arc::new(agent);
-        
-        // Notify about agent creation
-        let notification = AssistantResponseType::new_ai_message(
-            format!("🤖 Code Agent spawned: {}", agent.name()),
-            Some("agent-manager".to_string()),
-        );
-        let _ = self.response_tx.send(notification).await;
-        
-        tracing::info!("Spawned code agent: {}", agent.name());
-        
-        Some(agent)
+        // For backward compatibility, just spawn the first agent from multi-agent method
+        let agents = self.spawn_agents_for_requirements(requirements, update_tx).await;
+        agents.into_iter().next()
     }
     
     /// Check if input looks like a task request
