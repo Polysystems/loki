@@ -82,6 +82,7 @@ use crate::tui::state::MarketplacePluginInfo;
 use crate::tui::nlp::core::orchestrator::NaturalLanguageOrchestrator;
 // Add imports for real backend systems
 use crate::tools::{IntelligentToolManager, McpClient, ToolRequest, ToolResult};
+use crate::tools::intelligent_manager::ToolConfig;
 use crate::tools::metrics_collector::ToolStatus;
 use crate::tui::App;
 
@@ -391,14 +392,6 @@ pub struct ToolHealth {
     pub success_rate: f32,
 }
 
-/// Tool configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolConfig {
-    pub enabled: bool,
-    pub timeout_ms: u64,
-    pub retry_count: u32,
-    pub custom_settings: Value,
-}
 
 /// Tool analytics information
 #[derive(Debug, Clone)]
@@ -799,7 +792,7 @@ impl UtilitiesManager {
         natural_language_orchestrator: Option<Arc<NaturalLanguageOrchestrator>>,
     ) {
         self.mcp_client = mcp_client;
-        self.tool_manager = tool_manager;
+        self.tool_manager = tool_manager.clone();
         self.monitoring_system = monitoring_system;
         self.real_time_aggregator = real_time_aggregator;
         self.health_monitor = health_monitor;
@@ -809,6 +802,15 @@ impl UtilitiesManager {
         self.plugin_manager = plugin_manager;
         self.daemon_client = daemon_client;
         self.natural_language_orchestrator = natural_language_orchestrator;
+        
+        // If tool manager is connected, immediately populate the tool cache
+        if tool_manager.is_some() {
+            // Use the tool registry to populate initial tools
+            let tools = self.get_mock_tools(); // This actually uses the real tool registry
+            let mut cache = self.cached_metrics.write().unwrap();
+            cache.tools = tools;
+            debug!("Initialized tool cache with {} tools from registry", cache.tools.len());
+        }
     }
 
     /// Process natural language commands for utilities management
@@ -2586,9 +2588,16 @@ impl UtilitiesManager {
         debug!("Opening configuration editor for tool: {}", tool.name);
         self.editing_tool_config = Some(tool.id.clone());
         
-        // Initialize the editor with tool's current configuration or defaults
+        // Try to load saved configuration first
+        let saved_config = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                self.load_tool_config_from_file(&tool.id)
+            )
+        });
+        
+        // Initialize the editor with saved configuration or defaults
         // Include API key fields for tools that require them
-        let config = match tool.id.as_str() {
+        let config = saved_config.unwrap_or_else(|| match tool.id.as_str() {
             "github_integration" => serde_json::json!({
                 "enabled": true,
                 "timeout": 30000,
@@ -2712,10 +2721,66 @@ impl UtilitiesManager {
                 "last_used": tool.last_used,
                 "usage_count": tool.usage_count
             })
-        };
+        });
         
         // Pretty print the JSON for editing
         self.tool_config_editor = serde_json::to_string_pretty(&config).unwrap_or_else(|_| config.to_string());
+    }
+    
+    /// Persist tool configuration to a file for future sessions
+    async fn persist_tool_config_to_file(&self, tool_id: &str, config: &serde_json::Value) -> Result<()> {
+        use std::fs;
+        use std::path::PathBuf;
+        
+        // Get config directory (create if doesn't exist)
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
+            .join("loki")
+            .join("tools");
+        
+        fs::create_dir_all(&config_dir)?;
+        
+        // Save configuration to tool-specific file
+        let config_file = config_dir.join(format!("{}.json", tool_id));
+        let config_str = serde_json::to_string_pretty(config)?;
+        fs::write(&config_file, config_str)?;
+        
+        info!("Tool configuration persisted to: {:?}", config_file);
+        Ok(())
+    }
+    
+    /// Load tool configuration from file if it exists
+    async fn load_tool_config_from_file(&self, tool_id: &str) -> Option<serde_json::Value> {
+        use std::fs;
+        use std::path::PathBuf;
+        
+        let config_file = dirs::config_dir()?
+            .join("loki")
+            .join("tools")
+            .join(format!("{}.json", tool_id));
+        
+        if config_file.exists() {
+            match fs::read_to_string(&config_file) {
+                Ok(content) => {
+                    match serde_json::from_str(&content) {
+                        Ok(config) => {
+                            debug!("Loaded tool configuration from: {:?}", config_file);
+                            Some(config)
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse tool configuration file: {}", e);
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to read tool configuration file: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
     }
     
     /// Save tool configuration
@@ -2785,7 +2850,7 @@ impl UtilitiesManager {
                     // Update the tool configuration through IntelligentToolManager
                     if let Some(tool_manager) = &self.tool_manager {
                         // Configure the tool with the new settings
-                        let tool_config = crate::tools::ToolConfig {
+                        let tool_config = ToolConfig {
                             enabled: config.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
                             timeout_ms: config.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000),
                             retry_count: config.get("retries").and_then(|v| v.as_u64()).unwrap_or(3) as u32,
@@ -2820,6 +2885,11 @@ impl UtilitiesManager {
                         }
                     } else {
                         info!("Tool configuration saved locally for {} (no tool manager connected)", tool_id);
+                    }
+                    
+                    // Also persist configuration to a local file for future sessions
+                    if let Err(e) = self.persist_tool_config_to_file(tool_id, &config).await {
+                        warn!("Failed to persist tool configuration to file: {}", e);
                     }
                     
                     // Close the editor
@@ -4502,9 +4572,16 @@ impl UtilitiesManager {
                     self.tool_config_editor.clear();
                 }
                 KeyCode::F(2) => {
-                    // Save configuration (F2 key)
-                    if let Err(e) = self.save_tool_config().await {
-                        warn!("Failed to save tool configuration: {}", e);
+                    // Save configuration (F2 key) - only if JSON is valid
+                    match serde_json::from_str::<serde_json::Value>(&self.tool_config_editor) {
+                        Ok(_) => {
+                            if let Err(e) = self.save_tool_config().await {
+                                warn!("Failed to save tool configuration: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Cannot save invalid JSON configuration: {}", e);
+                        }
                     }
                 }
                 KeyCode::Char(c) => {
@@ -11406,7 +11483,7 @@ fn draw_tool_config_editor(f: &mut Frame, app: &mut App, area: Rect) {
     .alignment(Alignment::Center);
     f.render_widget(instructions, instructions_area);
     
-    // Draw editor content
+    // Draw editor content with JSON validation
     let editor_area = Rect::new(
         chunks[1].x + 1,
         chunks[1].y,
@@ -11414,20 +11491,34 @@ fn draw_tool_config_editor(f: &mut Frame, app: &mut App, area: Rect) {
         chunks[1].height,
     );
     
+    // Validate JSON and highlight errors
+    let validation_style = match serde_json::from_str::<serde_json::Value>(&app.state.utilities_manager.tool_config_editor) {
+        Ok(_) => Style::default().fg(Color::White), // Valid JSON
+        Err(_) => Style::default().fg(Color::Yellow), // Invalid JSON - show in yellow
+    };
+    
     let editor_content = Paragraph::new(app.state.utilities_manager.tool_config_editor.as_str())
         .block(Block::default().borders(Borders::NONE))
-        .style(Style::default().fg(Color::White))
+        .style(validation_style)
         .wrap(Wrap { trim: false });
     f.render_widget(editor_content, editor_area);
     
-    // Draw controls with save confirmation
-    let controls_text = if app.state.utilities_manager.tool_config_editor.contains("<Enter your") {
-        "⚠️  ESC: Cancel | F2: Save (Update API keys first!) | Tab: Indent"
-    } else {
-        "✅ ESC: Cancel | F2: Save Configuration | Tab: Indent | Enter: New Line"
+    // Draw controls with save confirmation and JSON validation status
+    let json_validation = serde_json::from_str::<serde_json::Value>(&app.state.utilities_manager.tool_config_editor);
+    let controls_text = match json_validation {
+        Ok(_) => {
+            if app.state.utilities_manager.tool_config_editor.contains("<Enter your") {
+                "⚠️  ESC: Cancel | F2: Save (Update API keys first!) | Tab: Indent".to_string()
+            } else {
+                "✅ Valid JSON | ESC: Cancel | F2: Save Configuration | Tab: Indent".to_string()
+            }
+        }
+        Err(e) => {
+            format!("❌ Invalid JSON: {} | ESC: Cancel", e.to_string().chars().take(40).collect::<String>())
+        }
     };
     
-    let controls = Paragraph::new(controls_text)
+    let controls = Paragraph::new(controls_text.as_str())
         .block(Block::default().borders(Borders::TOP))
         .style(Style::default().fg(Color::Gray))
         .alignment(Alignment::Center);
