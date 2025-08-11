@@ -336,6 +336,9 @@ impl MultiAgentOrchestrator {
 
         // Start consciousness synchronization
         self.consciousness_sync.clone().start().await?;
+        
+        // Start handling consciousness emergence events
+        self.handle_consciousness_emergence().await?;
 
         // Start distributed decision maker
         self.decision_maker.clone().start().await?;

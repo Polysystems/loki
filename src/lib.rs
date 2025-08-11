@@ -25,6 +25,7 @@ pub mod config;
 pub mod core;
 pub mod daemon;
 pub mod database;
+pub mod mcp;
 pub mod memory;
 pub mod models;
 pub mod monitoring;

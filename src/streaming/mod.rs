@@ -5,8 +5,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::RwLock;
+use tokio::sync::RwLock as TokioRwLock;
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::{debug, info, error};
+use crate::tui::event_bus::{EventBus, SystemEvent, TabId};
 
 pub mod buffer;
 pub mod enhanced_context_processor;
@@ -69,7 +71,7 @@ pub struct LegacyStreamConfig {
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 /// Stream manager for handling multiple concurrent streams
 pub struct StreamManager {
     streams: Arc<RwLock<HashMap<StreamId, StreamHandle>>>,
@@ -78,6 +80,8 @@ pub struct StreamManager {
     config: crate::config::Config,
     model_loader: Arc<crate::models::ModelLoader>,
     compute_manager: Arc<crate::compute::ComputeManager>,
+    /// Main event bus for system-wide events
+    main_event_bus: Arc<TokioRwLock<Option<Arc<EventBus>>>>,
 }
 
 #[derive(Debug)]
@@ -107,6 +111,48 @@ pub enum StreamEvent {
 }
 
 impl StreamManager {
+    /// Set the main event bus for broadcasting stream events
+    pub async fn set_event_bus(&self, event_bus: Arc<EventBus>) {
+        debug!("Connecting EventBus to StreamManager for real-time data broadcasting");
+        *self.main_event_bus.write().await = Some(event_bus);
+        debug!("EventBus successfully connected to StreamManager");
+    }
+    
+    /// Broadcast a stream event to the main event bus
+    async fn broadcast_stream_event(&self, event: &StreamEvent) {
+        if let Some(ref event_bus) = *self.main_event_bus.read().await {
+            let system_event = match event {
+                StreamEvent::StreamStarted(id) => {
+                    SystemEvent::MetricsUpdated {
+                        metric_type: format!("stream_started_{}", id),
+                        value: 1.0,
+                    }
+                }
+                StreamEvent::StreamStopped(id) => {
+                    SystemEvent::MetricsUpdated {
+                        metric_type: format!("stream_stopped_{}", id),
+                        value: 0.0,
+                    }
+                }
+                StreamEvent::ChunkProcessed(id, duration) => {
+                    SystemEvent::MetricsUpdated {
+                        metric_type: format!("stream_latency_{}", id),
+                        value: duration.as_millis() as f64,
+                    }
+                }
+                StreamEvent::Error(id, error) => {
+                    SystemEvent::ErrorOccurred {
+                        source: TabId::System,
+                        error: format!("Stream {} error: {}", id, error),
+                        severity: crate::tui::event_bus::ErrorSeverity::Warning,
+                    }
+                }
+            };
+            
+            let _ = event_bus.publish(system_event).await;
+        }
+    }
+    
     /// Create a new stream manager with proper configuration
     pub fn new(config: crate::config::Config) -> Result<Self> {
         let (event_sender, _) = broadcast::channel(1000);
@@ -120,6 +166,7 @@ impl StreamManager {
             config,
             model_loader,
             compute_manager,
+            main_event_bus: Arc::new(TokioRwLock::new(None)),
         })
     }
 
@@ -195,6 +242,12 @@ impl StreamManager {
         let _ = self.event_bus.send(StreamEvent::StreamStarted(stream_id.clone()));
 
         info!("Created stream: {:?}", stream_id);
+        
+        // Broadcast stream started event
+        let event = StreamEvent::StreamStarted(stream_id.clone());
+        let _ = self.event_bus.send(event.clone());
+        self.broadcast_stream_event(&event).await;
+        
         Ok(config.name)
     }
 
@@ -224,7 +277,9 @@ impl StreamManager {
         self.streams.write().remove(stream_id);
         self.pipelines.write().remove(stream_id);
 
-        let _ = self.event_bus.send(StreamEvent::StreamStopped(stream_id.clone()));
+        let event = StreamEvent::StreamStopped(stream_id.clone());
+        let _ = self.event_bus.send(event.clone());
+        self.broadcast_stream_event(&event).await;
 
         info!("Stopped stream: {:?}", stream_id);
         Ok(())
@@ -288,6 +343,7 @@ impl Default for StreamManager {
                     .expect("Default model loader should always work")
             })),
             compute_manager: Arc::new(crate::compute::ComputeManager::default()),
+            main_event_bus: Arc::new(TokioRwLock::new(None)),
         }
     }
 }
@@ -311,7 +367,7 @@ async fn stream_processing_loop(
 
                 // Send processed chunk
                 if let Err(e) = output.send(processed) {
-                    warn!("Failed to send processed chunk: {}", e);
+                    error!("Failed to send processed chunk for stream {:?}: {}", stream_id, e);
                     break;
                 }
 
@@ -319,7 +375,7 @@ async fn stream_processing_loop(
                 let _ = event_bus.send(StreamEvent::ChunkProcessed(stream_id.clone(), duration));
             }
             Err(e) => {
-                warn!("Error processing chunk for stream {:?}: {}", stream_id, e);
+                error!("Error processing chunk for stream {:?}: {}", stream_id, e);
                 let _ = event_bus.send(StreamEvent::Error(stream_id.clone(), e.to_string()));
             }
         }

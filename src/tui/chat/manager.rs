@@ -55,7 +55,7 @@ pub struct ChatManager {
     /// Processors
     input_processor: Arc<InputProcessor>,
     command_processor: Arc<CommandProcessor>,
-    message_processor: Arc<MessageProcessor>,
+    message_processor: Arc<RwLock<MessageProcessor>>,
     
     /// Integrations
     cognitive: Arc<CognitiveIntegration>,
@@ -82,10 +82,20 @@ impl ChatManager {
             SessionManager::new()
         ));
         
-        // Create agent manager
+        // Create agent manager and initialize pool
         let agents = Arc::new(RwLock::new(
             AgentManager::enabled()
         ));
+        
+        // Initialize the agent pool
+        {
+            let mut agent_manager = agents.write().await;
+            if let Err(e) = agent_manager.initialize_agent_pool().await {
+                tracing::warn!("Failed to initialize agent pool: {}", e);
+            } else {
+                tracing::info!("Agent pool initialized successfully");
+            }
+        }
         
         // Create context manager with 8000 token limit
         let context = Arc::new(RwLock::new(
@@ -104,14 +114,14 @@ impl ChatManager {
         // Natural language handler is used by subtabs, not directly by ChatManager
         // It will be created when subtabs are implemented
         
-        let message_processor = Arc::new(
+        let message_processor = Arc::new(RwLock::new(
             MessageProcessor::new(
                 state.clone(),
                 orchestration.clone(),
                 agents.clone(),
                 response_tx.clone(),
             )
-        );
+        ));
         
         // Create subtabs
         let subtabs: Vec<Box<dyn SubtabController>> = vec![
@@ -123,10 +133,22 @@ impl ChatManager {
             Box::new(crate::tui::chat::subtabs::OrchestrationTab::new(
                 orchestration.clone(),
             )),
-            Box::new(crate::tui::chat::subtabs::ModelsTab::new(
-                orchestration.clone(),
-                vec![], // Will be populated later with actual models
-            )),
+            // Models tab needs proper orchestrator - will be set up by modular system
+            // For now, create with a default orchestrator
+            Box::new({
+                let default_orchestrator = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        crate::models::ModelOrchestrator::new(&crate::config::ApiKeysConfig::default()).await
+                    })
+                });
+                match default_orchestrator {
+                    Ok(orchestrator) => crate::tui::chat::subtabs::ModelsTab::new(std::sync::Arc::new(orchestrator)),
+                    Err(e) => {
+                        tracing::error!("Failed to create ModelOrchestrator for models tab: {}", e);
+                        panic!("Cannot initialize models tab without ModelOrchestrator");
+                    }
+                }
+            }),
             Box::new(crate::tui::chat::subtabs::HistoryTab::new()),
             Box::new(crate::tui::chat::subtabs::SettingsTab::new()),
         ];
@@ -188,40 +210,51 @@ impl ChatManager {
         })
     }
     
-    /// Create a placeholder instance for initialization
-    pub fn placeholder() -> Self {
-        // Create dummy channels
-        let (message_tx, _) = mpsc::channel(1);
-        let (response_tx, response_rx) = mpsc::channel(1);
+    /// Create a properly initialized instance with minimal defaults
+    /// This is used when full initialization is not yet available
+    pub fn with_defaults() -> Self {
+        // Create proper channels
+        let (message_tx, _) = mpsc::channel(100);
+        let (response_tx, response_rx) = mpsc::channel(100);
+        
+        // Initialize with proper defaults instead of placeholders
+        let state = Arc::new(RwLock::new(ChatState::new(0, "Main Chat".to_string())));
+        let orchestration = Arc::new(RwLock::new(OrchestrationManager::default()));
+        let agents = Arc::new(RwLock::new(AgentManager::new()));
+        let session_manager = Arc::new(RwLock::new(SessionManager::new()));
+        
+        // Create tools with defaults
+        let tool_manager = Arc::new(crate::tools::intelligent_manager::IntelligentToolManager::new());
+        let task_manager = Arc::new(crate::tools::task_management::TaskManager::new());
         
         Self {
-            state: Arc::new(RwLock::new(ChatState::new(0, "Placeholder".to_string()))),
-            session_manager: Arc::new(RwLock::new(SessionManager::placeholder())),
-            orchestration: Arc::new(RwLock::new(OrchestrationManager::default())),
-            agents: Arc::new(RwLock::new(AgentManager::placeholder())),
-            context: Arc::new(RwLock::new(SmartContextManager::new(4096))),
+            state: state.clone(),
+            session_manager,
+            orchestration: orchestration.clone(),
+            agents: agents.clone(),
+            context: Arc::new(RwLock::new(SmartContextManager::new(8192))),
             storage_context: None,
             subtabs: vec![],
             active_subtab: 0,
             input_processor: Arc::new(InputProcessor::new(message_tx.clone())),
             command_processor: Arc::new(CommandProcessor::new(
-                Arc::new(RwLock::new(ChatState::new(0, "Placeholder".to_string()))),
-                Arc::new(RwLock::new(OrchestrationManager::default())),
+                state.clone(),
+                orchestration.clone(),
                 response_tx.clone(),
             )),
-            message_processor: Arc::new(MessageProcessor::new(
-                Arc::new(RwLock::new(ChatState::new(0, "Placeholder".to_string()))),
-                Arc::new(RwLock::new(OrchestrationManager::default())),
-                Arc::new(RwLock::new(AgentManager::placeholder())),
+            message_processor: Arc::new(RwLock::new(MessageProcessor::new(
+                state.clone(),
+                orchestration.clone(),
+                agents.clone(),
                 response_tx.clone(),
-            )),
+            ))),
             message_tx,
             response_rx,
             response_tx,
             cognitive: Arc::new(CognitiveIntegration::new()),
             tools: Arc::new(ToolIntegration::new(
-                Arc::new(crate::tools::intelligent_manager::IntelligentToolManager::placeholder()),
-                Arc::new(crate::tools::task_management::TaskManager::placeholder()),
+                tool_manager,
+                task_manager,
             )),
             nlp: Arc::new(NlpIntegration::new()),
         }
@@ -319,16 +352,12 @@ impl ChatManager {
 /// Helper methods for ChatManager
 impl ChatManager {
     /// Set the tool executor for command processing
-    pub fn set_tool_executor(&mut self, executor: Arc<crate::tui::chat::core::tool_executor::ChatToolExecutor>) {
+    pub async fn set_tool_executor(&mut self, executor: Arc<crate::tui::chat::core::tool_executor::ChatToolExecutor>) {
         // Get mutable access to the message processor
-        // Since message_processor is Arc<MessageProcessor>, we need to use Arc::get_mut
-        // or refactor MessageProcessor to use interior mutability
-        if let Some(processor) = Arc::get_mut(&mut self.message_processor) {
-            processor.set_tool_executor(executor);
-            tracing::info!("✅ Tool executor connected to message processor");
-        } else {
-            tracing::warn!("⚠️ Could not set tool executor - message processor has multiple references");
-        }
+        // Set tool executor on the message processor (now wrapped in RwLock)
+        let mut processor = self.message_processor.write().await;
+        processor.set_tool_executor(executor);
+        tracing::info!("✅ Tool executor connected to message processor");
     }
     
     /// Get the name of the current subtab
@@ -419,10 +448,10 @@ impl ChatManager {
             ).await?;
         }
         
-        // Process the message normally
-        // Note: MessageProcessor requires &mut self, but we have Arc<MessageProcessor>
-        // This is a design issue that needs to be addressed - for now, return Ok
-        // TODO: Refactor MessageProcessor to work with Arc or use interior mutability
+        // Process the message using the MessageProcessor
+        let mut processor = self.message_processor.write().await;
+        processor.process_message(&content, 0).await?;
+        
         Ok(())
     }
     
@@ -447,12 +476,42 @@ impl ChatManager {
     /// Switch to a different conversation
     pub async fn switch_conversation(&self, conversation_id: String) -> Result<()> {
         if let Some(storage) = &self.storage_context {
-            storage.switch_conversation(conversation_id).await?;
+            // Switch to the new conversation
+            storage.switch_conversation(conversation_id.clone()).await?;
             
-            // Clear current messages and reload from storage
+            // Clear current messages
             self.clear_messages().await?;
             
-            // TODO: Load messages from the switched conversation
+            // Load messages from the switched conversation
+            let messages = storage.get_conversation_messages(&conversation_id).await?;
+            
+            // Add loaded messages to the current state
+            let mut state = self.state.write().await;
+            for msg in messages {
+                // Convert ChatMessage to AssistantResponseType
+                state.messages.push(AssistantResponseType::ChatMessage {
+                    id: msg.id,
+                    role: msg.role,
+                    content: msg.content,
+                    timestamp: msg.timestamp.to_rfc3339(),
+                    metadata: crate::tui::run::MessageMetadata {
+                        model_used: None,
+                        tokens_used: msg.token_count.map(|tc| tc as u32),
+                        generation_time_ms: None,
+                        confidence_score: None,
+                        temperature: None,
+                        is_favorited: false,
+                        tags: Vec::new(),
+                        user_rating: None,
+                        created_at: msg.timestamp,
+                        last_edited: None,
+                        edit_count: 0,
+                    },
+                });
+            }
+            
+            tracing::info!("Loaded {} messages for conversation {}", 
+                state.messages.len(), conversation_id);
         }
         Ok(())
     }
@@ -468,5 +527,35 @@ impl ChatManager {
         // This method can be used to update subtab dependencies after creation
         // Currently, the subtabs are created with placeholder data and this can
         // be used to update them with real dependencies if needed
+    }
+    
+    /// Get the current input text from the edit buffer (async version)
+    pub async fn get_input_text_async(&self) -> String {
+        let state = self.state.read().await;
+        state.edit_buffer.clone()
+    }
+    
+    /// Get the current cursor position in the edit buffer (async version)
+    pub async fn get_cursor_position_async(&self) -> usize {
+        let state = self.state.read().await;
+        // Return the end of the edit buffer as cursor position
+        // This can be enhanced to track actual cursor position
+        state.edit_buffer.len()
+    }
+    
+    /// Get the current input text from the edit buffer (sync version for rendering)
+    pub fn get_input_text(&self) -> String {
+        // Use try_read for non-blocking access in render context
+        self.state.try_read()
+            .map(|state| state.edit_buffer.clone())
+            .unwrap_or_default()
+    }
+    
+    /// Get the current cursor position in the edit buffer (sync version for rendering)
+    pub fn get_cursor_position(&self) -> usize {
+        // Use try_read for non-blocking access in render context
+        self.state.try_read()
+            .map(|state| state.edit_buffer.len())
+            .unwrap_or(0)
     }
 }

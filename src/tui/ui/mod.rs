@@ -136,7 +136,10 @@ fn draw_enhanced_content(f: &mut Frame<'_>, app: &mut App, area: Rect) {
             use crate::tui::chat::rendering::modular_renderer;
             modular_renderer::render_modular_chat(f, app, area);
         }
-        ViewState::Utilities => draw_tab_utilities(f, app, area),
+        ViewState::Utilities => {
+            // Use the utilities manager from app state
+            app.state.utilities_manager.render(f, area);
+        }
         ViewState::Memory => draw_tab_memory(f, app, area),
         ViewState::Cognitive => draw_tab_cognitive(f, app, area),
         ViewState::Streams => draw_tab_social(f, app, area),

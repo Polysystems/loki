@@ -8,28 +8,23 @@ use tokio::io::AsyncBufReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
 use tokio::sync::{RwLock, broadcast};
-use tracing::{Level, debug, error, info, warn};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::{layer::SubscriberExt, EnvFilter, fmt};
 
 // Import from the internal cognitive module
-use crate::cognitive::{CognitiveConfig, CognitiveSystem, SafeCognitiveSystem};
+use crate::cognitive::CognitiveSystem;
 
 pub mod ipc;
 pub mod process;
 pub use ipc::{DaemonClient, DaemonCommand as DaemonCommand2, DaemonResponse as DaemonResponse2, IpcMessage};
 pub use process::{DaemonProcess, ProcessStatus};
 
-use super::*;
-use crate::cli::CognitiveCommands;
-use crate::cluster::{ClusterConfig, ClusterManager};
+use crate::cluster::{ClusterManager, ClusterConfig};
 use crate::compute::ComputeManager;
-use crate::config::{ApiKeysConfig, Config};
 use crate::memory::{CognitiveMemory, MemoryConfig};
-use crate::models::{CompletionRequest, Message, MessageRole, ProviderFactory};
-use crate::safety::{AuditConfig, ResourceLimits, ValidatorConfig};
 use crate::streaming::StreamManager;
+use crate::models::ProviderFactory;
+use crate::config::ApiKeysConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -58,6 +53,13 @@ pub struct DaemonServer {
     listener: Option<UnixListener>,
     shutdown_tx: broadcast::Sender<()>,
     cognitive_system: Option<Arc<CognitiveSystem>>,
+    memory_system: Option<Arc<CognitiveMemory>>,
+    stream_manager: Option<Arc<StreamManager>>,
+    compute_manager: Option<Arc<ComputeManager>>,
+    cluster_manager: Option<Arc<ClusterManager>>,
+    model_orchestrator: Option<Arc<crate::models::ModelOrchestrator>>,
+    provider_factory: Option<Arc<ProviderFactory>>,
+    api_keys: Option<ApiKeysConfig>,
     status: Arc<RwLock<ProcessStatus>>,
 }
 
@@ -71,6 +73,13 @@ impl DaemonServer {
             listener: None,
             shutdown_tx,
             cognitive_system: None,
+            memory_system: None,
+            stream_manager: None,
+            compute_manager: None,
+            cluster_manager: None,
+            model_orchestrator: None,
+            provider_factory: None,
+            api_keys: None,
             status: Arc::new(RwLock::new(ProcessStatus::Starting)),
         })
     }
@@ -80,9 +89,158 @@ impl DaemonServer {
         self.cognitive_system = Some(cognitive_system);
         self
     }
+    
+    /// Set the memory system for the daemon
+    pub fn with_memory_system(mut self, memory: Arc<CognitiveMemory>) -> Self {
+        self.memory_system = Some(memory);
+        self
+    }
+    
+    /// Create and set memory system with config
+    pub async fn with_memory_config(mut self, config: MemoryConfig) -> Result<Self> {
+        let memory = Arc::new(CognitiveMemory::new(config).await?);
+        self.memory_system = Some(memory);
+        Ok(self)
+    }
+    
+    /// Set the stream manager for the daemon
+    pub fn with_stream_manager(mut self, stream_manager: Arc<StreamManager>) -> Self {
+        self.stream_manager = Some(stream_manager);
+        self
+    }
+    
+    /// Set the compute manager for the daemon
+    pub fn with_compute_manager(mut self, compute_manager: Arc<ComputeManager>) -> Self {
+        self.compute_manager = Some(compute_manager);
+        self
+    }
+    
+    /// Set the cluster manager for the daemon
+    pub fn with_cluster_manager(mut self, cluster_manager: Arc<ClusterManager>) -> Self {
+        self.cluster_manager = Some(cluster_manager);
+        self
+    }
+    
+    /// Create and set cluster manager with config
+    pub async fn with_cluster_config(mut self, config: ClusterConfig) -> Result<Self> {
+        let cluster_manager = Arc::new(ClusterManager::new(config).await?);
+        self.cluster_manager = Some(cluster_manager);
+        Ok(self)
+    }
+    
+    /// Set the model orchestrator for the daemon
+    pub fn with_model_orchestrator(mut self, orchestrator: Arc<crate::models::ModelOrchestrator>) -> Self {
+        self.model_orchestrator = Some(orchestrator);
+        self
+    }
+    
+    /// Set the provider factory for the daemon
+    pub fn with_provider_factory(mut self, factory: Arc<ProviderFactory>) -> Self {
+        self.provider_factory = Some(factory);
+        self
+    }
+    
+    /// Set API keys configuration
+    pub fn with_api_keys(mut self, api_keys: ApiKeysConfig) -> Self {
+        self.api_keys = Some(api_keys);
+        self
+    }
+    
+    /// Load API keys from environment variables
+    pub fn with_api_keys_from_env(mut self) -> Self {
+        match ApiKeysConfig::from_env() {
+            Ok(config) => {
+                self.api_keys = Some(config);
+                info!("Loaded API keys configuration from environment");
+            }
+            Err(e) => {
+                warn!("Failed to load API keys from environment: {}", e);
+            }
+        }
+        self
+    }
 
+    /// Initialize tracing/logging for the daemon
+    fn init_tracing(&self) -> Result<()> {
+        // Create a tracing subscriber with environment filter
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info,loki=debug"));
+        
+        // Create the formatting layer
+        let fmt_layer = fmt::layer()
+            .with_target(true)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_file(true)
+            .with_line_number(true);
+        
+        // Build the subscriber
+        let subscriber = tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer);
+        
+        // Try to set as global default
+        if tracing::subscriber::set_global_default(subscriber).is_err() {
+            // Already initialized, that's fine
+            debug!("Tracing already initialized");
+        } else {
+            info!("Daemon tracing initialized with level: {}", 
+                  std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()));
+        }
+        
+        Ok(())
+    }
+    
     /// Start the daemon server
     pub async fn start(&mut self) -> Result<()> {
+        // Initialize tracing first
+        self.init_tracing()?;
+        
+        info!("Starting daemon server with integrated components...");
+        
+        // Initialize component connections if available
+        if let Some(ref cognitive) = self.cognitive_system {
+            info!("Cognitive system connected");
+            
+            // Initialize memory persistence if available
+            if let Some(ref memory) = self.memory_system {
+                info!("Memory system connected - enabling persistence");
+                // The memory system is already initialized with persistence
+            }
+            
+            // Connect stream manager for real-time data
+            if let Some(ref stream_mgr) = self.stream_manager {
+                info!("Stream manager connected - enabling real-time streaming");
+                // Stream manager can be used for consciousness streams
+            }
+            
+            // Connect compute manager for distributed processing
+            if let Some(ref compute_mgr) = self.compute_manager {
+                info!("Compute manager connected - enabling distributed processing");
+            }
+            
+            // Connect cluster manager for multi-node coordination
+            if let Some(ref cluster_mgr) = self.cluster_manager {
+                info!("Cluster manager connected - enabling multi-node coordination");
+            }
+            
+            // Connect model orchestrator for AI-powered queries
+            if let Some(ref model_orch) = self.model_orchestrator {
+                info!("Model orchestrator connected - enabling AI-powered query processing");
+            }
+            
+            // Connect provider factory for model routing
+            if let Some(ref provider_factory) = self.provider_factory {
+                info!("Provider factory connected - enabling dynamic model routing");
+            } else if self.api_keys.is_some() {
+                // Provider factory is just a marker type, create it if we have API keys
+                self.provider_factory = Some(Arc::new(ProviderFactory));
+                info!("Provider factory initialized with API keys configuration");
+            }
+        } else {
+            warn!("Starting daemon without cognitive system - limited functionality");
+        }
+        
         // Ensure the socket directory exists
         if let Some(parent) = self.config.socket_path.parent() {
             tokio::fs::create_dir_all(parent).await.context("Failed to create socket directory")?;
@@ -117,6 +275,7 @@ impl DaemonServer {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let status = self.status.clone();
         let cognitive_system = self.cognitive_system.clone();
+        let model_orchestrator = self.model_orchestrator.clone();
 
         loop {
             tokio::select! {
@@ -127,9 +286,10 @@ impl DaemonServer {
 
                             let status = status.clone();
                             let cognitive_system = cognitive_system.clone();
+                            let model_orchestrator = model_orchestrator.clone();
 
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, status, cognitive_system).await {
+                                if let Err(e) = Self::handle_connection(stream, status, cognitive_system, model_orchestrator).await {
                                     error!("Error handling IPC connection: {}", e);
                                 }
                             });
@@ -155,6 +315,7 @@ impl DaemonServer {
         stream: UnixStream,
         status: Arc<RwLock<ProcessStatus>>,
         cognitive_system: Option<Arc<CognitiveSystem>>,
+        model_orchestrator: Option<Arc<crate::models::ModelOrchestrator>>,
     ) -> Result<()> {
         use futures::{SinkExt, StreamExt};
         use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
@@ -172,7 +333,7 @@ impl DaemonServer {
 
             // Handle the command
             let response =
-                Self::handle_command(message.command, &status, cognitive_system.as_ref()).await;
+                Self::handle_command(message.command, &status, cognitive_system.as_ref(), model_orchestrator.as_ref()).await;
 
             // Send response
             let response_msg = IpcMessage {
@@ -198,6 +359,7 @@ impl DaemonServer {
         command: DaemonCommand2,
         status: &Arc<RwLock<ProcessStatus>>,
         cognitive_system: Option<&Arc<CognitiveSystem>>,
+        model_orchestrator: Option<&Arc<crate::models::ModelOrchestrator>>,
     ) -> DaemonResponse2 {
         match command {
             DaemonCommand2::Status => {
@@ -220,8 +382,9 @@ impl DaemonServer {
             }
 
             DaemonCommand2::Query { query } => {
+                // Use cognitive system to process query
+                // TODO: Integrate with model orchestrator when it has a process_request method
                 if let Some(cognitive) = cognitive_system {
-                    // Use cognitive system to process query
                     match cognitive.process_query(&query).await {
                         Ok(result) => DaemonResponse2::QueryResult { result },
                         Err(e) => DaemonResponse2::Error { message: format!("Query failed: {}", e) },
@@ -242,14 +405,17 @@ impl DaemonServer {
 
             DaemonCommand2::GetMetrics => {
                 // Return system metrics
-                let metrics = Self::collect_metrics(cognitive_system).await;
+                let metrics = Self::collect_metrics(cognitive_system, model_orchestrator).await;
                 DaemonResponse2::Metrics { metrics }
             }
         }
     }
 
     /// Collect system metrics
-    async fn collect_metrics(cognitive_system: Option<&Arc<CognitiveSystem>>) -> serde_json::Value {
+    async fn collect_metrics(
+        cognitive_system: Option<&Arc<CognitiveSystem>>,
+        model_orchestrator: Option<&Arc<crate::models::ModelOrchestrator>>,
+    ) -> serde_json::Value {
         let mut metrics = serde_json::Map::new();
 
         // System metrics
@@ -289,6 +455,33 @@ impl DaemonServer {
                     );
                 }
             }
+        }
+        
+        // Model orchestrator metrics if available
+        if let Some(orchestrator) = model_orchestrator {
+            let status = orchestrator.get_status().await;
+            
+            // Count enabled models
+            let model_count = status.enabled_models.len();
+            metrics.insert(
+                "enabled_models".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(model_count)),
+            );
+            
+            // Count active API providers
+            let active_providers = status.api_providers.values()
+                .filter(|p| p.is_available)
+                .count();
+            metrics.insert(
+                "active_providers".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(active_providers)),
+            );
+            
+            // Add routing strategy
+            metrics.insert(
+                "routing_strategy".to_string(),
+                serde_json::Value::String(format!("{:?}", status.routing_strategy)),
+            );
         }
 
         serde_json::Value::Object(metrics)

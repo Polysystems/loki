@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::pin::Pin;
 use tokio::sync::RwLock;
 use serde::{Serialize, Deserialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use anyhow::Result;
 use tracing::{info, debug, warn, error};
 use futures::future::BoxFuture;
@@ -89,6 +89,7 @@ pub enum DataDestination {
     Context(String),
     Cache(String),
     Result,
+    Final,
     Multiple(Vec<DataDestination>),
 }
 
@@ -315,6 +316,13 @@ impl PipelineOrchestrator {
         procs.insert("aggregate".to_string(), Box::new(AggregateProcessor));
         procs.insert("validate".to_string(), Box::new(ValidateProcessor));
         procs.insert("enrich".to_string(), Box::new(EnrichProcessor));
+        
+        // Register orchestration-specific processors
+        procs.insert("context_processor".to_string(), Box::new(ContextProcessor));
+        procs.insert("research_processor".to_string(), Box::new(ResearchProcessor));
+        procs.insert("creative_processor".to_string(), Box::new(CreativeProcessor));
+        procs.insert("general_processor".to_string(), Box::new(GeneralProcessor));
+        procs.insert("post_processor".to_string(), Box::new(PostProcessor));
     }
     
     /// Register a pipeline
@@ -570,6 +578,7 @@ impl PipelineOrchestrator {
                 self.cache_value(key, data.clone()).await;
             }
             DataDestination::Result => {}
+            DataDestination::Final => {}
             DataDestination::Multiple(destinations) => {
                 for dest in destinations {
                     self.map_output(
@@ -593,14 +602,207 @@ impl PipelineOrchestrator {
     async fn apply_transformation(&self, transformation: &Transformation, data: Value) -> Result<Value> {
         match transformation {
             Transformation::JsonPath(path) => {
-                // Simple JSON path implementation
-                Ok(data) // TODO: Implement proper JSON path
+                // Implement JSON path extraction
+                self.extract_json_path(&data, path)
             }
             Transformation::Template(template) => {
-                // Simple template replacement
-                Ok(Value::String(template.clone()))
+                // Template replacement with data interpolation
+                self.apply_template(template, &data)
+            }
+            Transformation::Function(func_name) => {
+                // Apply named function transformation
+                self.apply_function(func_name, data).await
+            }
+            Transformation::Map(mappings) => {
+                // Apply key-value mappings
+                self.apply_mappings(mappings, data)
+            }
+            Transformation::Filter(expression) => {
+                // Filter array elements based on expression
+                self.apply_filter(expression, data)
+            }
+            Transformation::Reduce(expression) => {
+                // Reduce array to single value
+                self.apply_reduce(expression, data)
+            }
+        }
+    }
+    
+    /// Extract value using JSON path notation
+    fn extract_json_path(&self, data: &Value, path: &str) -> Result<Value> {
+        // Handle root reference
+        if path == "$" || path == "." {
+            return Ok(data.clone());
+        }
+        
+        // Remove leading $ or . if present
+        let clean_path = path.trim_start_matches('$').trim_start_matches('.');
+        
+        // Split path into segments
+        let segments: Vec<&str> = clean_path.split('.').filter(|s| !s.is_empty()).collect();
+        
+        // Traverse the JSON structure
+        let mut current = data;
+        
+        for segment in segments {
+            // Handle array indexing
+            if segment.contains('[') && segment.contains(']') {
+                let parts: Vec<&str> = segment.split('[').collect();
+                let field = parts[0];
+                let index_str = parts[1].trim_end_matches(']');
+                
+                // First get the field if it exists
+                if !field.is_empty() {
+                    current = current.get(field).ok_or_else(|| {
+                        anyhow::anyhow!("Field '{}' not found in JSON path", field)
+                    })?;
+                }
+                
+                // Handle array index or wildcard
+                if index_str == "*" {
+                    // Return all array elements
+                    if let Some(array) = current.as_array() {
+                        return Ok(Value::Array(array.clone()));
+                    } else {
+                        return Err(anyhow::anyhow!("Expected array for wildcard indexing"));
+                    }
+                } else {
+                    // Parse numeric index
+                    let index: usize = index_str.parse()
+                        .map_err(|_| anyhow::anyhow!("Invalid array index: {}", index_str))?;
+                    
+                    current = current.as_array()
+                        .and_then(|arr| arr.get(index))
+                        .ok_or_else(|| anyhow::anyhow!("Array index {} out of bounds", index))?;
+                }
+            } else {
+                // Regular field access
+                current = current.get(segment).ok_or_else(|| {
+                    anyhow::anyhow!("Field '{}' not found in JSON path", segment)
+                })?;
+            }
+        }
+        
+        Ok(current.clone())
+    }
+    
+    /// Apply template with data interpolation
+    fn apply_template(&self, template: &str, data: &Value) -> Result<Value> {
+        let mut result = template.to_string();
+        
+        // Find all placeholders like {{field}} or {{path.to.field}}
+        let re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
+        
+        for cap in re.captures_iter(template) {
+            if let Some(path) = cap.get(1) {
+                let path_str = path.as_str().trim();
+                
+                // Extract value using JSON path
+                match self.extract_json_path(data, path_str) {
+                    Ok(value) => {
+                        let replacement = match value {
+                            Value::String(s) => s,
+                            Value::Number(n) => n.to_string(),
+                            Value::Bool(b) => b.to_string(),
+                            v => v.to_string(),
+                        };
+                        result = result.replace(&format!("{{{{{}}}}}", path_str), &replacement);
+                    }
+                    Err(_) => {
+                        // Keep placeholder if path not found
+                    }
+                }
+            }
+        }
+        
+        Ok(Value::String(result))
+    }
+    
+    /// Apply named function transformation
+    async fn apply_function(&self, func_name: &str, data: Value) -> Result<Value> {
+        match func_name {
+            "uppercase" => {
+                if let Some(s) = data.as_str() {
+                    Ok(Value::String(s.to_uppercase()))
+                } else {
+                    Ok(data)
+                }
+            }
+            "lowercase" => {
+                if let Some(s) = data.as_str() {
+                    Ok(Value::String(s.to_lowercase()))
+                } else {
+                    Ok(data)
+                }
+            }
+            "trim" => {
+                if let Some(s) = data.as_str() {
+                    Ok(Value::String(s.trim().to_string()))
+                } else {
+                    Ok(data)
+                }
+            }
+            "length" => {
+                match data {
+                    Value::String(ref s) => Ok(Value::Number(serde_json::Number::from(s.len()))),
+                    Value::Array(ref a) => Ok(Value::Number(serde_json::Number::from(a.len()))),
+                    Value::Object(ref o) => Ok(Value::Number(serde_json::Number::from(o.len()))),
+                    _ => Ok(Value::Number(serde_json::Number::from(0))),
+                }
             }
             _ => Ok(data),
+        }
+    }
+    
+    /// Apply key-value mappings
+    fn apply_mappings(&self, mappings: &HashMap<String, String>, data: Value) -> Result<Value> {
+        if let Some(s) = data.as_str() {
+            if let Some(mapped) = mappings.get(s) {
+                return Ok(Value::String(mapped.clone()));
+            }
+        }
+        Ok(data)
+    }
+    
+    /// Apply filter expression to array
+    fn apply_filter(&self, expression: &str, data: Value) -> Result<Value> {
+        if let Some(array) = data.as_array() {
+            // Simple filter implementation
+            // For now, just filter non-null values
+            let filtered: Vec<Value> = array.iter()
+                .filter(|v| !v.is_null())
+                .cloned()
+                .collect();
+            Ok(Value::Array(filtered))
+        } else {
+            Ok(data)
+        }
+    }
+    
+    /// Apply reduce expression to array
+    fn apply_reduce(&self, expression: &str, data: Value) -> Result<Value> {
+        if let Some(array) = data.as_array() {
+            // Simple reduce implementation
+            match expression {
+                "sum" => {
+                    let sum: f64 = array.iter()
+                        .filter_map(|v| v.as_f64())
+                        .sum();
+                    Ok(json!(sum))
+                }
+                "count" => {
+                    Ok(json!(array.len()))
+                }
+                "first" => {
+                    Ok(array.first().cloned().unwrap_or(Value::Null))
+                }
+                "last" => {
+                    Ok(array.last().cloned().unwrap_or(Value::Null))
+                }
+                _ => Ok(data),
+            }
+        } else {
+            Ok(data)
         }
     }
     
@@ -696,6 +898,103 @@ impl StageProcessor for EnrichProcessor {
     
     fn name(&self) -> &str {
         "enrich"
+    }
+}
+
+/// Context processor for preparing input context
+struct ContextProcessor;
+
+#[async_trait::async_trait]
+impl StageProcessor for ContextProcessor {
+    async fn process(&self, input: Value, context: &mut ExecutionContext) -> Result<Value> {
+        // Extract and prepare context from input
+        let mut result = input.clone();
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("processed_at".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+            obj.insert("context_ready".to_string(), Value::Bool(true));
+        }
+        Ok(result)
+    }
+    
+    fn name(&self) -> &str {
+        "context_processor"
+    }
+}
+
+/// Research processor for research-oriented tasks
+struct ResearchProcessor;
+
+#[async_trait::async_trait]
+impl StageProcessor for ResearchProcessor {
+    async fn process(&self, input: Value, _context: &mut ExecutionContext) -> Result<Value> {
+        // Process research tasks
+        let result = serde_json::json!({
+            "type": "research",
+            "input": input,
+            "sources_analyzed": 0,
+            "findings": []
+        });
+        Ok(result)
+    }
+    
+    fn name(&self) -> &str {
+        "research_processor"
+    }
+}
+
+/// Creative processor for creative generation tasks
+struct CreativeProcessor;
+
+#[async_trait::async_trait]
+impl StageProcessor for CreativeProcessor {
+    async fn process(&self, input: Value, _context: &mut ExecutionContext) -> Result<Value> {
+        // Process creative tasks
+        let result = serde_json::json!({
+            "type": "creative",
+            "input": input,
+            "variations": [],
+            "creativity_score": 0.8
+        });
+        Ok(result)
+    }
+    
+    fn name(&self) -> &str {
+        "creative_processor"
+    }
+}
+
+/// General processor for general tasks
+struct GeneralProcessor;
+
+#[async_trait::async_trait]
+impl StageProcessor for GeneralProcessor {
+    async fn process(&self, input: Value, _context: &mut ExecutionContext) -> Result<Value> {
+        // Process general tasks
+        Ok(input)
+    }
+    
+    fn name(&self) -> &str {
+        "general_processor"
+    }
+}
+
+/// Post processor for final processing
+struct PostProcessor;
+
+#[async_trait::async_trait]
+impl StageProcessor for PostProcessor {
+    async fn process(&self, input: Value, _context: &mut ExecutionContext) -> Result<Value> {
+        // Final post-processing
+        let mut result = input.clone();
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("post_processed".to_string(), Value::Bool(true));
+            obj.insert("completed_at".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+        }
+        Ok(result)
+    }
+    
+    fn name(&self) -> &str {
+        "post_processor"
     }
 }
 

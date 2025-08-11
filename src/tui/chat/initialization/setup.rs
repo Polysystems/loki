@@ -250,6 +250,9 @@ async fn start_background_processors(
                         cognitive::CognitiveEvent::ActivityChanged(level) => {
                             tracing::debug!("Cognitive activity level: {:.2}", level);
                         }
+                        cognitive::CognitiveEvent::MoodChanged(mood) => {
+                            tracing::info!("Cognitive mood changed: {}", mood);
+                        }
                         cognitive::CognitiveEvent::Error(error) => {
                             tracing::error!("Cognitive error: {}", error);
                         }
@@ -356,9 +359,16 @@ pub async fn initialize_minimal_chat() -> Result<ChatComponents> {
     // Initialize orchestration manager
     let orchestration = Arc::new(RwLock::new(OrchestrationManager::default()));
     
+    // Initialize tool and task managers
+    let tool_manager = Arc::new(crate::tools::intelligent_manager::IntelligentToolManager::new());
+    let task_manager = Arc::new(crate::tools::task_management::TaskManager::new());
+    
     // Create minimal integrations
     let cognitive_integration = Arc::new(CognitiveIntegration::new());
-    let tool_integration = Arc::new(ToolIntegration::placeholder());
+    let tool_integration = Arc::new(ToolIntegration::new(
+        tool_manager.clone(),
+        task_manager.clone(),
+    ));
     let nlp_integration = Arc::new(NlpIntegration::new());
     
     // Create chat manager
@@ -396,8 +406,8 @@ pub async fn initialize_minimal_chat() -> Result<ChatComponents> {
 }
 
 // Helper functions for optional dependencies
-fn get_mcp_client() -> Option<Arc<crate::tools::mcp_client::McpClient>> {
-    use crate::tools::mcp_client::{McpClient, McpClientConfig, McpServer};
+fn get_mcp_client() -> Option<Arc<crate::mcp::McpClient>> {
+    use crate::mcp::{McpClient, McpClientConfig, McpServer};
     use std::collections::HashMap;
     
     // Create MCP client with default config
@@ -432,7 +442,14 @@ fn get_mcp_client() -> Option<Arc<crate::tools::mcp_client::McpClient>> {
 }
 
 fn get_safety_validator() -> Option<Arc<crate::safety::ActionValidator>> {
-    // In a real implementation, this would get the safety validator
-    // For now, return None to use basic NLP
-    None
+    use crate::safety::{ActionValidator, ValidatorConfig};
+    
+    // Create safety validator with default config
+    let rt = tokio::runtime::Runtime::new().ok()?;
+    let validator = rt.block_on(async {
+        ActionValidator::new(ValidatorConfig::default()).await
+    }).ok()?;
+    
+    tracing::info!("🛡️ Safety validator initialized");
+    Some(Arc::new(validator))
 }

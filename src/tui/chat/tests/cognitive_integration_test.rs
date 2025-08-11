@@ -13,7 +13,7 @@ mod cognitive_integration_tests {
     use crate::models::multi_agent_orchestrator::MultiAgentOrchestrator;
     use crate::tools::IntelligentToolManager;
     use crate::tools::task_management::{TaskManager, TaskConfig};
-    use crate::tools::mcp_client::{McpClient, McpClientConfig};
+    use crate::mcp::{McpClient, McpClientConfig};
     use crate::safety::ActionValidator;
     use std::sync::Arc;
     use tokio::sync::RwLock;

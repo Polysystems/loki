@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
-use uuid::Uuid;
 use wide::f32x8;
 
 pub mod cache;

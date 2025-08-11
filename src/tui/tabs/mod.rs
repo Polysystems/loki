@@ -4,7 +4,7 @@
 pub mod social;
 pub use social::*;
 pub mod settings;
-pub mod utilities;
+// pub mod utilities; // Old utilities module has been migrated to src/tui/utilities/
 pub mod stories;
 pub mod cognitive;
 pub use cognitive::*;
@@ -17,7 +17,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::prelude::{Color, Line, Modifier, Span, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Wrap, Gauge, Sparkline};
 pub use settings::*;
-pub use utilities::*;
+// pub use utilities::*; // Old utilities module has been migrated
 
 use chrono::Utc;
 use crate::tui::App;
@@ -367,7 +367,16 @@ fn draw_welcome_system_status(f: &mut Frame, app: &App, area: Rect) {
 // ===== Monitoring Functions (moved from utilities) =====
 
 /// Draw monitoring management interface with enhanced visuals
-fn draw_monitoring_management(f: &mut Frame, app: &App, area: Rect) {
+fn draw_monitoring_management(f: &mut Frame, _app: &App, area: Rect) {
+    // Temporarily disabled - will be reimplemented with new ModularUtilities
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .title("Monitoring (Migrating to new system)");
+    f.render_widget(block, area);
+    return;
+    
+    // Original implementation commented out for migration
+    /*
     // Try to get real metrics from the cache
     let cache = app.state.utilities_manager.cached_metrics.read().unwrap();
     
@@ -609,6 +618,7 @@ fn draw_monitoring_performance_graphs(f: &mut Frame, area: Rect, cache: &crate::
             .alignment(Alignment::Center);
         f.render_widget(placeholder, chunks[1]);
     }
+    */
 }
 
 /// Draw resources panel

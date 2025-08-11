@@ -3,18 +3,18 @@
 //! This module provides encrypted storage for sensitive data like API keys,
 //! database credentials, and other secrets with platform-specific keyring integration.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::fs;
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, debug};
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
 use argon2::{
-    password_hash::{PasswordHasher, Salt, SaltString},
+    password_hash::{PasswordHasher, SaltString},
     Argon2,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -369,9 +369,6 @@ impl SecureStorage {
                 // Use Windows Credential Store
                 self.save_to_credential_store().await?;
             }
-            _ => {
-                bail!("Platform keyring not implemented");
-            }
         }
         
         Ok(())
@@ -421,9 +418,6 @@ impl SecureStorage {
             #[cfg(target_os = "windows")]
             StorageBackend::WindowsCredentialStore => {
                 self.load_from_credential_store().await?;
-            }
-            _ => {
-                bail!("Platform keyring not implemented");
             }
         }
         

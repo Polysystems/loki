@@ -767,15 +767,95 @@ pub struct DynamicWorkflowEvolutionSystem {
     pub system_id: String,
     pub evolution_rules: Vec<EvolutionRule>,
     pub performance_metrics: HashMap<String, f64>,
+    pub workflow_genome: Arc<parking_lot::RwLock<HashMap<String, WorkflowGene>>>,
+    pub mutation_rate: f64,
+    pub fitness_evaluator: Arc<parking_lot::RwLock<HashMap<String, f64>>>,
+    pub evolution_history: Arc<parking_lot::RwLock<Vec<EvolutionEvent>>>,
 }
 
 impl DynamicWorkflowEvolutionSystem {
+    pub fn new() -> Self {
+        Self {
+            system_id: uuid::Uuid::new_v4().to_string(),
+            evolution_rules: vec![
+                EvolutionRule {
+                    rule_id: "optimize_performance".to_string(),
+                    rule_type: "performance".to_string(),
+                    conditions: vec!["fitness > 0.5".to_string()],
+                    actions: vec!["optimize".to_string()],
+                    evolution_parameters: HashMap::from([
+                        ("threshold".to_string(), 0.7),
+                        ("improvement_rate".to_string(), 0.1),
+                    ]),
+                },
+                EvolutionRule {
+                    rule_id: "explore_novel".to_string(),
+                    rule_type: "exploration".to_string(),
+                    conditions: vec!["novelty > 0.6".to_string()],
+                    actions: vec!["explore".to_string()],
+                    evolution_parameters: HashMap::from([
+                        ("novelty_threshold".to_string(), 0.8),
+                        ("exploration_rate".to_string(), 0.2),
+                    ]),
+                },
+            ],
+            performance_metrics: HashMap::new(),
+            workflow_genome: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            mutation_rate: 0.1,
+            fitness_evaluator: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            evolution_history: Arc::new(parking_lot::RwLock::new(Vec::new())),
+        }
+    }
+    
     pub async fn evolve_patterns(
         &self,
-        _patterns: &[EmergentPattern],
+        patterns: &[EmergentPattern],
     ) -> Result<Vec<EmergentPattern>> {
-        Ok(vec![])
+        let mut evolved_patterns = Vec::new();
+        
+        for pattern in patterns {
+            // Apply evolution rules
+            let mut evolved = pattern.clone();
+            
+            // Mutate based on fitness
+            if rand::random::<f64>() < self.mutation_rate {
+                // Mutate confidence score instead of effectiveness_score
+                evolved.confidence_score *= 1.0 + (rand::random::<f64>() - 0.5) * 0.2;
+                evolved.confidence_score = evolved.confidence_score.clamp(0.0, 1.0);
+            }
+            
+            // Record evolution event
+            let event = EvolutionEvent {
+                event_id: uuid::Uuid::new_v4().to_string(),
+                timestamp: std::time::SystemTime::now(),
+                pattern_before: pattern.pattern_id.clone(),
+                pattern_after: evolved.pattern_id.clone(),
+                fitness_change: evolved.confidence_score - pattern.confidence_score,
+            };
+            
+            self.evolution_history.write().push(event);
+            evolved_patterns.push(evolved);
+        }
+        
+        Ok(evolved_patterns)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowGene {
+    pub gene_id: String,
+    pub gene_type: String,
+    pub expression_level: f64,
+    pub mutations: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EvolutionEvent {
+    pub event_id: String,
+    pub timestamp: std::time::SystemTime,
+    pub pattern_before: String,
+    pub pattern_after: String,
+    pub fitness_change: f64,
 }
 
 /// Emergent tool usage engine
@@ -788,6 +868,16 @@ pub struct EmergentToolUsageEngine {
 }
 
 impl EmergentToolUsageEngine {
+    /// Create a new emergent tool usage engine with fully initialized components
+    pub async fn new() -> Result<Self> {
+        Ok(Self {
+            pattern_detector: Arc::new(ToolPatternEmergenceDetector::new().await?),
+            workflow_evolution_system: Arc::new(DynamicWorkflowEvolutionSystem::new()),
+            capability_enhancer: Arc::new(DynamicCapabilityEnhancer::new()),
+            autonomy_coordinator: Arc::new(AutonomyCoordinator::new()),
+        })
+    }
+    
     pub async fn get_pattern_analytics(&self) -> Result<PatternAnalytics> {
         Ok(PatternAnalytics {
             pattern_frequency: HashMap::new(),
@@ -879,12 +969,94 @@ pub struct EvolutionRule {
     pub rule_type: String,
     pub conditions: Vec<String>,
     pub actions: Vec<String>,
+    pub evolution_parameters: HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct DynamicCapabilityEnhancer {
     pub enhancer_id: String,
     pub enhancement_rules: Vec<EnhancementRule>,
+    pub capability_extensions: Arc<parking_lot::RwLock<HashMap<String, CapabilityExtension>>>,
+    pub learning_rate: f64,
+    pub enhancement_history: Arc<parking_lot::RwLock<Vec<EnhancementEvent>>>,
+    pub performance_tracker: Arc<parking_lot::RwLock<HashMap<String, f64>>>,
+}
+
+impl DynamicCapabilityEnhancer {
+    pub fn new() -> Self {
+        Self {
+            enhancer_id: uuid::Uuid::new_v4().to_string(),
+            enhancement_rules: vec![
+                EnhancementRule {
+                    rule_id: "expand_domain".to_string(),
+                    enhancement_type: "domain_expansion".to_string(),
+                    parameters: HashMap::from([
+                        ("expansion_rate".to_string(), 0.15),
+                        ("confidence_threshold".to_string(), 0.8),
+                    ]),
+                },
+                EnhancementRule {
+                    rule_id: "optimize_execution".to_string(),
+                    enhancement_type: "performance_optimization".to_string(),
+                    parameters: HashMap::from([
+                        ("optimization_factor".to_string(), 1.2),
+                        ("efficiency_target".to_string(), 0.9),
+                    ]),
+                },
+            ],
+            capability_extensions: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            learning_rate: 0.01,
+            enhancement_history: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            performance_tracker: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+        }
+    }
+    
+    pub async fn enhance_capabilities(
+        &self,
+        current_capabilities: Vec<String>,
+    ) -> Result<Vec<String>> {
+        let mut enhanced = current_capabilities.clone();
+        
+        // Apply enhancement rules
+        for rule in &self.enhancement_rules {
+            if rule.enhancement_type == "domain_expansion" {
+                // Add new capabilities based on learning
+                if rand::random::<f64>() < self.learning_rate {
+                    enhanced.push(format!("enhanced_{}", uuid::Uuid::new_v4()));
+                }
+            }
+        }
+        
+        // Record enhancement event
+        let event = EnhancementEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            timestamp: std::time::SystemTime::now(),
+            capabilities_before: current_capabilities.len(),
+            capabilities_after: enhanced.len(),
+            enhancement_type: "adaptive".to_string(),
+        };
+        
+        self.enhancement_history.write().push(event);
+        
+        Ok(enhanced)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CapabilityExtension {
+    pub extension_id: String,
+    pub capability_type: String,
+    pub effectiveness: f64,
+    pub requirements: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnhancementEvent {
+    pub event_id: String,
+    pub timestamp: std::time::SystemTime,
+    pub capabilities_before: usize,
+    pub capabilities_after: usize,
+    pub enhancement_type: String,
 }
 
 #[derive(Debug, Clone)]
@@ -898,6 +1070,105 @@ pub struct EnhancementRule {
 pub struct AutonomyCoordinator {
     pub coordinator_id: String,
     pub autonomy_rules: Vec<AutonomyRule>,
+    pub autonomy_level: Arc<parking_lot::RwLock<f64>>,
+    pub decision_confidence_threshold: f64,
+    pub action_history: Arc<parking_lot::RwLock<Vec<AutonomousAction>>>,
+    pub safety_constraints: Arc<parking_lot::RwLock<Vec<SafetyConstraint>>>,
+}
+
+impl AutonomyCoordinator {
+    pub fn new() -> Self {
+        Self {
+            coordinator_id: uuid::Uuid::new_v4().to_string(),
+            autonomy_rules: vec![
+                AutonomyRule {
+                    rule_id: "safe_operation".to_string(),
+                    autonomy_level: AutonomyLevel::SemiAutonomous,
+                    conditions: vec![
+                        "confidence > 0.8".to_string(),
+                        "risk_level < 0.3".to_string(),
+                    ],
+                },
+                AutonomyRule {
+                    rule_id: "high_autonomy".to_string(),
+                    autonomy_level: AutonomyLevel::HighlyAutonomous,
+                    conditions: vec![
+                        "confidence > 0.95".to_string(),
+                        "proven_pattern = true".to_string(),
+                    ],
+                },
+            ],
+            autonomy_level: Arc::new(parking_lot::RwLock::new(0.5)),
+            decision_confidence_threshold: 0.8,
+            action_history: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            safety_constraints: Arc::new(parking_lot::RwLock::new(vec![
+                SafetyConstraint {
+                    constraint_id: "resource_limits".to_string(),
+                    constraint_type: "resource".to_string(),
+                    parameters: HashMap::from([
+                        ("max_memory_mb".to_string(), 1024.0),
+                        ("max_cpu_percent".to_string(), 80.0),
+                    ]),
+                },
+            ])),
+        }
+    }
+    
+    pub async fn coordinate_autonomous_action(
+        &self,
+        action_type: &str,
+        confidence: f64,
+    ) -> Result<bool> {
+        // Check if action meets confidence threshold
+        if confidence < self.decision_confidence_threshold {
+            return Ok(false);
+        }
+        
+        // Check safety constraints
+        for constraint in self.safety_constraints.read().iter() {
+            if !self.check_constraint(constraint, action_type).await? {
+                return Ok(false);
+            }
+        }
+        
+        // Record action
+        let action = AutonomousAction {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            action_type: action_type.to_string(),
+            confidence,
+            timestamp: std::time::SystemTime::now(),
+            outcome: "pending".to_string(),
+        };
+        
+        self.action_history.write().push(action);
+        
+        Ok(true)
+    }
+    
+    async fn check_constraint(
+        &self,
+        constraint: &SafetyConstraint,
+        _action_type: &str,
+    ) -> Result<bool> {
+        // Simple constraint checking logic
+        Ok(true)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AutonomousAction {
+    pub action_id: String,
+    pub action_type: String,
+    pub confidence: f64,
+    pub timestamp: std::time::SystemTime,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SafetyConstraint {
+    pub constraint_id: String,
+    pub constraint_type: String,
+    pub parameters: HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone)]

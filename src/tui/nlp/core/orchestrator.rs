@@ -21,7 +21,8 @@ use crate::models::multi_agent_orchestrator::MultiAgentOrchestrator;
 use crate::safety::ActionValidator;
 use crate::tools::{IntelligentToolManager};
 use crate::tools::task_management::{TaskManager, TaskPriority};
-use crate::tools::mcp_client::McpClient;
+use crate::mcp::McpClient;
+use super::processor::ToolSuggestion;
 
 // Feature-gated imports
 #[cfg(feature = "deep-cognition")]
@@ -235,6 +236,49 @@ impl NaturalLanguageOrchestrator {
         Ok(())
     }
     
+    /// Initialize MCP integration and discover available tools
+    pub async fn initialize_mcp_integration(&self) -> Result<()> {
+        info!("🔌 Initializing MCP integration");
+        
+        // Discover all MCP servers and their tools
+        let servers = self.mcp_client.list_servers().await?;
+        let mut total_tools = 0;
+        
+        for server_name in servers {
+            match self.mcp_client.get_capabilities(&server_name).await {
+                Ok(capabilities) => {
+                    info!("📦 MCP Server '{}': {} tools available", 
+                        server_name, capabilities.tools.len());
+                    
+                    // Register each MCP tool with the tool manager
+                    for mcp_tool in capabilities.tools {
+                        let tool_metadata = serde_json::json!({
+                            "name": format!("mcp_{}", mcp_tool.name),
+                            "description": mcp_tool.description.clone(),
+                            "category": "MCP",
+                            "version": "1.0.0",
+                            "author": server_name.clone(),
+                            "tags": vec!["mcp", "external"],
+                        });
+                        
+                        // Register with tool manager using the new dynamic registration API
+                        if let Err(e) = self.tool_manager.register_dynamic_tool(tool_metadata).await {
+                            warn!("Failed to register MCP tool '{}': {}", mcp_tool.name, e);
+                        } else {
+                            total_tools += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to get capabilities for MCP server '{}': {}", server_name, e);
+                }
+            }
+        }
+        
+        info!("✅ MCP integration initialized with {} total tools", total_tools);
+        Ok(())
+    }
+    
     /// Initialize story enhancement if available
     #[cfg(feature = "story-enhancement")]
     pub async fn initialize_story_enhancement(&self) -> Result<()> {
@@ -409,6 +453,7 @@ impl NaturalLanguageOrchestrator {
                 primary_response: format!("I cannot process this request due to safety concerns: {}", e),
                 intent: Some(intent),
                 extracted_tasks: vec![],
+                tool_suggestions: vec![],
                 suggestions: vec!["Please rephrase your request.".to_string()],
                 session_context: json!(session.context),
                 follow_up_needed: false,
@@ -453,6 +498,7 @@ impl NaturalLanguageOrchestrator {
                 primary_response: content,
                 intent: None,
                 extracted_tasks: vec![],
+                tool_suggestions: vec![],
                 suggestions: deep_response.cognitive_suggestions,
                 session_context: context,
                 follow_up_needed: true,
@@ -495,6 +541,7 @@ impl NaturalLanguageOrchestrator {
                 primary_response: content,
                 intent: None,
                 extracted_tasks: vec![],
+                tool_suggestions: vec![],
                 suggestions: vec![
                     "Would you like me to explore variations of these ideas?".to_string(),
                     "I can combine these concepts in novel ways.".to_string(),
@@ -538,6 +585,7 @@ impl NaturalLanguageOrchestrator {
                 primary_response: content,
                 intent: None,
                 extracted_tasks: vec![],
+                tool_suggestions: vec![],
                 suggestions: vec![
                     "Would you like to talk more about this?".to_string(),
                     "I'm here to listen and help however I can.".to_string(),
@@ -572,6 +620,7 @@ impl NaturalLanguageOrchestrator {
                 primary_response: content,
                 intent: None,
                 extracted_tasks: vec![],
+                tool_suggestions: vec![],
                 suggestions: deep_response.cognitive_suggestions,
                 session_context: context,
                 follow_up_needed: true,
@@ -607,6 +656,7 @@ impl NaturalLanguageOrchestrator {
             primary_response: content,
             intent: None,
             extracted_tasks: vec![],
+            tool_suggestions: vec![],
             suggestions: vec![
                 "Review current capabilities with /status".to_string(),
                 "Check evolution history with /history evolution".to_string(),
@@ -632,6 +682,7 @@ impl NaturalLanguageOrchestrator {
                 primary_response: content,
                 intent: None,
                 extracted_tasks: vec![],
+                tool_suggestions: vec![],
                 suggestions,
                 session_context: json!({"mode": "story"}),
                 follow_up_needed: true,
@@ -643,6 +694,7 @@ impl NaturalLanguageOrchestrator {
                 primary_response: "📖 Story-driven features not yet initialized. Initialize with cognitive system first.".to_string(),
                 intent: None,
                 extracted_tasks: vec![],
+                tool_suggestions: vec![],
                 suggestions: vec![],
                 session_context: json!({"mode": "story"}),
                 follow_up_needed: false,
@@ -675,6 +727,7 @@ impl NaturalLanguageOrchestrator {
                         primary_response: format!("🤖 Spawning agent {} for task: {}", agent_id, args),
                         intent: None,
                         extracted_tasks: vec![],
+                tool_suggestions: vec![],
                         suggestions: vec!["Use /agent status to check agent status".to_string()],
                         session_context: json!({"spawned_agent": agent_id}),
                         follow_up_needed: false,
@@ -693,6 +746,8 @@ impl NaturalLanguageOrchestrator {
                         primary_response: content,
                         intent: None,
                         extracted_tasks: vec![],
+                tool_suggestions: vec![],
+                tool_suggestions: vec![],
                         suggestions: vec![],
                         session_context: json!({"agent_count": agents.len()}),
                         follow_up_needed: false,
@@ -1239,6 +1294,7 @@ impl NaturalLanguageOrchestrator {
             ),
             intent: None,
             extracted_tasks: original_tasks.to_vec(),
+            tool_suggestions: vec![],
             suggestions: vec![
                 "Review the task breakdown".to_string(),
                 "Use /agent spawn to start parallel execution".to_string(),
@@ -1403,6 +1459,7 @@ impl NaturalLanguageOrchestrator {
                     primary_response: response_text,
                     intent: Some(intent.clone()),
                     extracted_tasks: tasks.to_vec(),
+                    tool_suggestions: vec![],
                     suggestions: vec![],
                     session_context: json!({"conversation_type": conv_type}),
                     follow_up_needed: false,
@@ -1447,15 +1504,107 @@ impl NaturalLanguageOrchestrator {
         
         let response_text = task_response.content;
         
+        // Generate tool suggestions based on intent
+        let tool_suggestions = self.generate_tool_suggestions(intent, input).await;
+        
         Ok(OrchestrationResponse {
             primary_response: response_text,
             intent: Some(intent.clone()),
             extracted_tasks: tasks.to_vec(),
+            tool_suggestions,
             suggestions: vec![],
             session_context: json!({}),
             follow_up_needed: false,
             confidence: understanding.confidence,
         })
+    }
+    
+    /// Generate tool suggestions based on intent
+    async fn generate_tool_suggestions(&self, intent: &Intent, input: &str) -> Vec<ToolSuggestion> {
+        let mut suggestions = Vec::new();
+        
+        match &intent.primary_intent {
+            IntentType::ExecuteCommand => {
+                // Check for file operations
+                if input.contains("read") || input.contains("open") || input.contains("show") {
+                    if let Some(path) = self.extract_path_from_input(input) {
+                        suggestions.push(ToolSuggestion {
+                            tool: "read_file".to_string(),
+                            args: json!({ "path": path }),
+                            description: format!("Read file: {}", path),
+                            confidence: 0.8,
+                        });
+                    }
+                } else if input.contains("search") || input.contains("find") || input.contains("grep") {
+                    let query = intent.parameters.get("query")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(input)
+                        .to_string();
+                    suggestions.push(ToolSuggestion {
+                        tool: "search_files".to_string(),
+                        args: json!({ "query": query.clone(), "path": "." }),
+                        description: format!("Searching for: {}", query),
+                        confidence: 0.7,
+                    });
+                } else if input.contains("create") || input.contains("make") || input.contains("new") {
+                    if input.contains("directory") || input.contains("folder") {
+                        if let Some(path) = self.extract_path_from_input(input) {
+                            suggestions.push(ToolSuggestion {
+                                tool: "create_directory".to_string(),
+                                args: json!({ "path": path.clone() }),
+                                description: format!("Creating directory: {}", path),
+                                confidence: 0.8,
+                            });
+                        }
+                    } else if input.contains("file") {
+                        if let Some(path) = self.extract_path_from_input(input) {
+                            suggestions.push(ToolSuggestion {
+                                tool: "create_file".to_string(),
+                                args: json!({ "path": path.clone(), "content": "" }),
+                                description: format!("Creating file: {}", path),
+                                confidence: 0.7,
+                            });
+                        }
+                    }
+                }
+            }
+            IntentType::CreateContent => {
+                // Suggest creation tools
+                if input.contains("task") || input.contains("todo") {
+                    suggestions.push(ToolSuggestion {
+                        tool: "create_task".to_string(),
+                        args: json!({ 
+                            "description": input,
+                            "priority": "medium"
+                        }),
+                        description: "Creating a new task".to_string(),
+                        confidence: 0.8,
+                    });
+                }
+            }
+            IntentType::FixIssue => {
+                // Suggest analysis tools
+                suggestions.push(ToolSuggestion {
+                    tool: "analyze_code".to_string(),
+                    args: json!({ 
+                        "path": self.extract_path_from_input(input).unwrap_or_else(|| ".".to_string()),
+                        "issue": input
+                    }),
+                    description: "Analyzing code for issues".to_string(),
+                    confidence: 0.7,
+                });
+            }
+            _ => {
+                // No specific tool suggestions for other intent types
+            }
+        }
+        
+        // Validate these suggestions against available tools
+        if let Ok(available_tools) = self.tool_manager.get_available_tools().await {
+            suggestions.retain(|s| available_tools.iter().any(|tool_name| tool_name == &s.tool));
+        }
+        
+        suggestions
     }
     
     async fn update_session(
@@ -1479,6 +1628,81 @@ impl NaturalLanguageOrchestrator {
         }
         
         Ok(())
+    }
+    
+    /// Try to execute a tool request through MCP
+    async fn try_mcp_execution(
+        &self,
+        tool_request: &crate::tools::ToolRequest,
+    ) -> Result<Option<OrchestrationResponse>> {
+        // Check if MCP has any servers available
+        let available_servers = match self.mcp_client.list_servers().await {
+            Ok(servers) if !servers.is_empty() => servers,
+            _ => return Ok(None), // No MCP servers available
+        };
+        
+        info!("🔌 Checking {} MCP servers for tool: {}", available_servers.len(), tool_request.tool_name);
+        
+        // Try each MCP server to find one that can handle this tool
+        for server_name in available_servers {
+            // Get server capabilities
+            let capabilities = match self.mcp_client.get_capabilities(&server_name).await {
+                Ok(caps) => caps,
+                Err(e) => {
+                    warn!("Failed to get capabilities for MCP server {}: {}", server_name, e);
+                    continue;
+                }
+            };
+            
+            // Check if this server has a matching tool
+            let matching_tool = capabilities.tools.iter()
+                .find(|tool| tool.name == tool_request.tool_name || 
+                      tool.name.contains(&tool_request.tool_name) ||
+                      tool_request.tool_name.contains(&tool.name));
+            
+            if let Some(mcp_tool) = matching_tool {
+                info!("🎯 Found matching MCP tool '{}' on server '{}'", mcp_tool.name, server_name);
+                
+                // Convert parameters to MCP format
+                let mcp_call = crate::mcp::client::McpToolCall {
+                    name: mcp_tool.name.clone(),
+                    arguments: serde_json::to_value(&tool_request.parameters)?,
+                };
+                
+                // Execute through MCP
+                match self.mcp_client.call_tool(&server_name, mcp_call).await {
+                    Ok(mcp_response) => {
+                        let response_text = if mcp_response.success {
+                            format!("✅ [MCP] Successfully completed: {}\n\n{}", 
+                                mcp_tool.name,
+                                serde_json::to_string_pretty(&mcp_response.content).unwrap_or_default()
+                            )
+                        } else {
+                            format!("❌ [MCP] Failed: {}", 
+                                mcp_response.error.unwrap_or_else(|| "Unknown error".to_string())
+                            )
+                        };
+                        
+                        return Ok(Some(OrchestrationResponse {
+                            primary_response: response_text,
+                            intent: None,
+                            extracted_tasks: vec![],
+                            tool_suggestions: vec![],
+                            suggestions: vec![],
+                            session_context: mcp_response.content,
+                            follow_up_needed: false,
+                            confidence: 0.9,
+                        }));
+                    }
+                    Err(e) => {
+                        warn!("MCP tool execution failed: {}", e);
+                        // Continue to try other servers or fall back to internal tools
+                    }
+                }
+            }
+        }
+        
+        Ok(None) // No MCP server could handle this tool
     }
     
     /// Try to execute tools if the intent requires it
@@ -1530,7 +1754,14 @@ impl NaturalLanguageOrchestrator {
         // Build tool request
         let tool_request = self.build_tool_request_from_input(input, intent, tasks)?;
         
-        // Execute tool
+        // First, try to execute through MCP if available
+        if let Ok(mcp_result) = self.try_mcp_execution(&tool_request).await {
+            if let Some(response) = mcp_result {
+                return Ok(Some(response));
+            }
+        }
+        
+        // Fall back to internal tool manager
         info!("🛠️ Executing tool request: {} with tool: {}", tool_request.intent, tool_request.tool_name);
         info!("🛠️ Tool parameters: {:?}", tool_request.parameters);
         match self.tool_manager.execute_tool_request(tool_request).await {
@@ -1554,6 +1785,7 @@ impl NaturalLanguageOrchestrator {
                     primary_response: response_text,
                     intent: Some(intent.clone()),
                     extracted_tasks: tasks.to_vec(),
+                    tool_suggestions: vec![],
                     suggestions: result.content.get("suggestions")
                         .and_then(|v| v.as_array())
                         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -1782,6 +2014,7 @@ pub struct OrchestrationResponse {
     pub primary_response: String,
     pub intent: Option<Intent>,
     pub extracted_tasks: Vec<ExtractedTask>,
+    pub tool_suggestions: Vec<ToolSuggestion>,
     pub suggestions: Vec<String>,
     pub session_context: serde_json::Value,
     pub follow_up_needed: bool,

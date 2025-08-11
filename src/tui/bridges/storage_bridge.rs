@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use anyhow::{Result, Context};
 use std::collections::HashMap;
-use tracing::{info, debug, warn, error};
+use tracing::{info, debug, warn};
 
 use crate::storage::{
     SecureStorage, SecureStorageConfig,
@@ -298,6 +298,15 @@ impl StorageBridge {
             .context("Chat history not initialized")?;
         
         chat_storage.search(query, limit).await
+    }
+    
+    /// Get messages for a conversation
+    pub async fn get_conversation_messages(&self, conversation_id: &str) -> Result<Vec<crate::storage::chat_history::ChatMessage>> {
+        let history = self.chat_history.read().await;
+        let chat_storage = history.as_ref()
+            .context("Chat history not initialized")?;
+        
+        chat_storage.get_conversation_messages(conversation_id).await
     }
     
     /// Get storage status

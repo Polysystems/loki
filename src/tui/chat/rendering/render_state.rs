@@ -365,10 +365,6 @@ impl RenderStateManager {
                             "Technical implementation and debugging".to_string(),
                             vec!["coding".to_string(), "debugging".to_string(), "technical".to_string()]
                         ),
-                        crate::cognitive::agents::AgentSpecialization::Analytical => (
-                            "Research and information gathering".to_string(),
-                            vec!["research".to_string(), "search".to_string(), "analysis".to_string()]
-                        ),
                         crate::cognitive::agents::AgentSpecialization::Social => (
                             "Communication and content creation".to_string(),
                             vec!["writing".to_string(), "communication".to_string(), "content".to_string()]

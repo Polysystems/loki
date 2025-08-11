@@ -180,7 +180,7 @@ pub struct NLPResult {
     pub requires_confirmation: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSuggestion {
     /// Tool to execute
     pub tool: String,
@@ -190,6 +190,9 @@ pub struct ToolSuggestion {
     
     /// Human-readable description
     pub description: String,
+    
+    /// Confidence in this suggestion (0.0 to 1.0)
+    pub confidence: f64,
 }
 
 impl NaturalLanguageProcessor {
@@ -600,6 +603,7 @@ impl NaturalLanguageProcessor {
                         tool: "read_file".to_string(),
                         args: json!({ "path": p }),
                         description: format!("Reading file: {}", p),
+                        confidence: 0.9,
                     }),
                     Some(format!("Let me read {} for you.", p)),
                     false,
@@ -611,6 +615,7 @@ impl NaturalLanguageProcessor {
                         tool: "search_files".to_string(),
                         args: json!({ "query": query, "path": path }),
                         description: format!("Searching for: {}", query),
+                        confidence: 0.8,
                     }),
                     Some(format!("Searching for '{}' in the codebase...", query)),
                     false,
@@ -624,6 +629,7 @@ impl NaturalLanguageProcessor {
                         description: format!("Analyzing code{}", 
                             file.as_ref().map(|f| format!(" in {}", f)).unwrap_or_default()
                         ),
+                        confidence: 0.75,
                     }),
                     Some("Let me analyze the code for you.".to_string()),
                     false,
@@ -635,6 +641,7 @@ impl NaturalLanguageProcessor {
                         tool: "edit_file".to_string(),
                         args: json!({ "path": path, "changes": changes }),
                         description: "Editing file".to_string(),
+                        confidence: 0.85,
                     }),
                     Some("I'll help you edit the file.".to_string()),
                     true, // Require confirmation for edits
@@ -646,6 +653,7 @@ impl NaturalLanguageProcessor {
                         tool: "create_task".to_string(),
                         args: json!({ "description": description, "priority": priority }),
                         description: format!("Creating task: {}", description),
+                        confidence: 0.8,
                     }),
                     Some("I'll create this task for you.".to_string()),
                     false,
@@ -657,6 +665,7 @@ impl NaturalLanguageProcessor {
                         tool: "mcp_filesystem_create_directory".to_string(),
                         args: json!({ "path": p }),
                         description: format!("Creating directory: {}", p),
+                        confidence: 0.85,
                     }),
                     Some(format!("Creating folder: {}", p)),
                     false,
@@ -668,6 +677,7 @@ impl NaturalLanguageProcessor {
                         tool: "mcp_filesystem_list_directory".to_string(),
                         args: json!({ "path": directory.as_ref().unwrap_or(&".".to_string()) }),
                         description: format!("Listing files in: {}", directory.as_ref().unwrap_or(&"current directory".to_string())),
+                        confidence: 0.85,
                     }),
                     Some(format!("Listing files in {}", directory.as_ref().unwrap_or(&"current directory".to_string()))),
                     false,
@@ -679,6 +689,7 @@ impl NaturalLanguageProcessor {
                         tool: "mcp_filesystem_delete".to_string(),
                         args: json!({ "path": p }),
                         description: format!("Deleting: {}", p),
+                        confidence: 0.9,
                     }),
                     Some(format!("Deleting {}", p)),
                     true, // Require confirmation for deletions
@@ -690,6 +701,7 @@ impl NaturalLanguageProcessor {
                         tool: "mcp_filesystem_move".to_string(),
                         args: json!({ "from": f, "to": t }),
                         description: format!("Moving {} to {}", f, t),
+                        confidence: 0.85,
                     }),
                     Some(format!("Moving {} to {}", f, t)),
                     true, // Require confirmation for moves
@@ -701,6 +713,7 @@ impl NaturalLanguageProcessor {
                         tool: "mcp_filesystem_copy".to_string(),
                         args: json!({ "from": f, "to": t }),
                         description: format!("Copying {} to {}", f, t),
+                        confidence: 0.85,
                     }),
                     Some(format!("Copying {} to {}", f, t)),
                     false,

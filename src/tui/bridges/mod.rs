@@ -11,6 +11,10 @@ pub mod event_bridge;
 pub mod context_sync;
 pub mod editor_bridge;
 pub mod storage_bridge;
+pub mod orchestration_bridge;
+pub mod agent_bridge;
+pub mod todo_task_bridge;
+pub mod story_bridge;
 
 // Re-export key types
 pub use tool_bridge::ToolBridge;
@@ -20,6 +24,7 @@ pub use event_bridge::EventBridge;
 pub use context_sync::ContextSync;
 pub use editor_bridge::EditorBridge;
 pub use storage_bridge::{StorageBridge, StorageStatus};
+pub use story_bridge::StoryBridge;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

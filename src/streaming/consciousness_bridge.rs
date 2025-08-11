@@ -10,10 +10,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::streaming::enhanced_context_processor::{EnhancedContext, EnhancedContextProcessor};
-use crate::streaming::{StreamChunk, ProcessedInput};
 
 /// Configuration for streaming consciousness bridge
 #[derive(Debug, Clone, Serialize, Deserialize)]

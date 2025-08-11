@@ -254,9 +254,17 @@ impl SafeCognitiveSystem {
         )
         .await?;
 
-        // For now, return a simple response - in the real implementation this would
-        // delegate to the inner cognitive system
-        Ok(format!("Query processed: {}", query))
+        // Delegate to the inner cognitive system for actual processing
+        match self.inner.process_query(query).await {
+            Ok(response) => {
+                info!("Query processed successfully");
+                Ok(response)
+            }
+            Err(e) => {
+                error!("Query processing failed: {}", e);
+                Err(e)
+            }
+        }
     }
 
     /// Check the health of the cognitive system

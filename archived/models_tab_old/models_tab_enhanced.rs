@@ -16,7 +16,7 @@ use anyhow::Result;
 
 use super::SubtabController;
 use crate::tui::chat::{
-    models::{discovery::ModelDiscoveryEngine, catalog::{ModelCatalog, ModelEntry, ModelCategory}},
+    models::{discovery::{ModelDiscoveryEngine, AvailabilityStatus}, catalog::{ModelCatalog, ModelEntry, ModelCategory}},
     orchestration::OrchestrationManager,
 };
 
@@ -64,6 +64,9 @@ pub struct EnhancedModelsTab {
     
     /// Error message
     error_message: Option<String>,
+    
+    /// Table state for benchmark view
+    table_state: ratatui::widgets::TableState,
 }
 
 impl EnhancedModelsTab {
@@ -87,6 +90,7 @@ impl EnhancedModelsTab {
             compare_models: Vec::new(),
             is_loading: false,
             error_message: None,
+            table_state: ratatui::widgets::TableState::default(),
         }
     }
     
@@ -250,27 +254,29 @@ impl EnhancedModelsTab {
                     ModelCategory::Vision => "👁️",
                     ModelCategory::Audio => "🎵",
                     ModelCategory::Embedding => "🔤",
-                    ModelCategory::Specialized => "⚡",
+                    ModelCategory::Instruct => "📝",
+                    ModelCategory::Video => "🎬",
+                    ModelCategory::General => "⚡",
                 };
                 
                 // Availability indicator
-                let status = if model.availability.is_available {
-                    "✅"
-                } else {
-                    "⚠️"
+                let status = match model.availability {
+                    AvailabilityStatus::Available => "✅",
+                    AvailabilityStatus::Limited => "🟡",
+                    AvailabilityStatus::Unavailable => "⚠️",
+                    AvailabilityStatus::Deprecated => "🔴",
+                    AvailabilityStatus::Unknown => "❓",
                 };
                 
                 // Price indicator
-                let price_indicator = if let Some(price) = model.pricing.per_1k_tokens {
-                    if price < 0.001 {
-                        "💚" // Very cheap
-                    } else if price < 0.01 {
-                        "💛" // Moderate
-                    } else {
-                        "💰" // Expensive
-                    }
+                // Use average of input/output pricing for indicator
+                let avg_price = (model.pricing.input_per_1k_tokens + model.pricing.output_per_1k_tokens) / 2.0;
+                let price_indicator = if avg_price < 0.001 {
+                    "💚" // Very cheap
+                } else if avg_price < 0.01 {
+                    "💛" // Moderate
                 } else {
-                    "❓"
+                    "💰" // Expensive
                 };
                 
                 let content = format!(
@@ -285,7 +291,7 @@ impl EnhancedModelsTab {
                 
                 let style = if selected {
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else if !model.availability.is_available {
+                } else if model.availability != AvailabilityStatus::Available {
                     Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default()
@@ -325,7 +331,7 @@ impl EnhancedModelsTab {
             }
             
             // Performance metrics
-            if let Some(latency) = model.performance.avg_latency_ms {
+            if let Some(latency) = model.performance.latency_ms {
                 lines.push(Line::from(vec![
                     Span::raw("⚡ "),
                     Span::styled(
@@ -336,11 +342,12 @@ impl EnhancedModelsTab {
             }
             
             // Pricing
-            if let Some(price) = model.pricing.per_1k_tokens {
+            let avg_price = (model.pricing.input_per_1k_tokens + model.pricing.output_per_1k_tokens) / 2.0;
+            if avg_price > 0.0 {
                 lines.push(Line::from(vec![
                     Span::raw("💵 "),
                     Span::styled(
-                        format!("${:.4}/1k tokens", price),
+                        format!("${:.4}/1k tokens (avg)", avg_price),
                         Style::default().fg(Color::Yellow)
                     ),
                 ]));
@@ -363,21 +370,281 @@ impl EnhancedModelsTab {
     }
 }
 
+impl EnhancedModelsTab {
+    /// Render benchmark view showing performance metrics
+    fn render_benchmark_view(&mut self, f: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),   // Title
+                Constraint::Min(0),      // Benchmark results
+            ])
+            .split(area);
+        
+        // Title
+        let title = Paragraph::new("⚡ Model Benchmarks")
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::BOTTOM));
+        f.render_widget(title, chunks[0]);
+        
+        // Collect benchmark data
+        let mut benchmark_data: Vec<(&str, f64, f64, u64)> = Vec::new();
+        for model in &self.displayed_models {
+            // Use performance metrics directly from model
+            if model.performance.latency_ms.is_some() || model.performance.tokens_per_second.is_some() {
+                // Extract available performance data
+                let latency = model.performance.latency_ms.unwrap_or(0.0);
+                let tokens_per_sec = model.performance.tokens_per_second.unwrap_or(0.0);
+                let accuracy = model.performance.accuracy_score.unwrap_or(1.0) * 100.0;
+                benchmark_data.push((
+                    &model.id,
+                    latency,
+                    accuracy,
+                    tokens_per_sec as u64,
+                ));
+            }
+        }
+        
+        // Sort by response time
+        benchmark_data.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        
+        // Create benchmark table
+        let header = Row::new(vec!["Model", "Latency (ms)", "Accuracy", "Tokens/sec"])
+            .style(Style::default().add_modifier(Modifier::BOLD))
+            .bottom_margin(1);
+        
+        let rows: Vec<Row> = benchmark_data.iter().map(|(name, response_time, success_rate, requests)| {
+            Row::new(vec![
+                name.to_string(),
+                format!("{:.0}ms", response_time),
+                format!("{:.1}%", success_rate),
+                requests.to_string(),
+            ])
+        }).collect();
+        
+        let table = Table::new(rows, vec![
+            Constraint::Percentage(40),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+        ])
+        .header(header)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(" Performance Metrics "))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_symbol("→ ");
+        
+        f.render_stateful_widget(table, chunks[1], &mut self.table_state);
+        
+        // Instructions
+        let instructions = Paragraph::new("Use ↑/↓ to navigate | Press B to run benchmark | ESC to return")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(instructions, Rect {
+            x: chunks[1].x,
+            y: chunks[1].y + chunks[1].height - 1,
+            width: chunks[1].width,
+            height: 1,
+        });
+    }
+    
+    /// Render comparison view for multiple models
+    fn render_compare_view(&mut self, f: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),   // Title
+                Constraint::Min(0),      // Comparison
+            ])
+            .split(area);
+        
+        // Title
+        let title = Paragraph::new("📊 Model Comparison")
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::BOTTOM));
+        f.render_widget(title, chunks[0]);
+        
+        // Get up to 3 models to compare
+        let models_to_compare: Vec<_> = self.displayed_models.iter()
+            .take(3)
+            .collect();
+        
+        if models_to_compare.is_empty() {
+            let message = Paragraph::new("No models available for comparison")
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(Alignment::Center)
+                .block(Block::default().borders(Borders::ALL));
+            f.render_widget(message, chunks[1]);
+            return;
+        }
+        
+        // Create comparison columns
+        let comparison_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Percentage(100 / models_to_compare.len() as u16); models_to_compare.len()])
+            .split(chunks[1]);
+        
+        for (i, model) in models_to_compare.iter().enumerate() {
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(&model.id, Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Provider: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(&model.provider),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Capabilities:", Style::default().add_modifier(Modifier::BOLD)),
+                ]),
+            ];
+            
+            for cap in &model.capabilities {
+                lines.push(Line::from(vec![
+                    Span::raw("• "),
+                    Span::raw(format!("{:?}", cap)),
+                ]));
+            }
+            
+            lines.push(Line::from(""));
+            
+            // Use performance metrics directly from model
+            if model.performance.latency_ms.is_some() || model.performance.tokens_per_second.is_some() {
+                lines.push(Line::from(vec![
+                    Span::styled("Performance:", Style::default().add_modifier(Modifier::BOLD)),
+                ]));
+                if let Some(latency) = model.performance.latency_ms {
+                    lines.push(Line::from(format!("Latency: {:.0}ms", latency)));
+                }
+                if let Some(tps) = model.performance.tokens_per_second {
+                    lines.push(Line::from(format!("Speed: {:.0} tok/s", tps)));
+                }
+                if let Some(accuracy) = model.performance.accuracy_score {
+                    lines.push(Line::from(format!("Accuracy: {:.1}%", accuracy * 100.0)));
+                }
+            }
+            
+            let comparison = Paragraph::new(lines)
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded));
+            f.render_widget(comparison, comparison_chunks[i]);
+        }
+        
+        // Instructions
+        let instructions = Paragraph::new("Press SPACE to select models for comparison | ESC to return")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(instructions, Rect {
+            x: chunks[1].x,
+            y: chunks[1].y + chunks[1].height - 1,
+            width: chunks[1].width,
+            height: 1,
+        });
+    }
+    
+    /// Render detailed view of selected model
+    fn render_details_view(&mut self, f: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),   // Title
+                Constraint::Min(0),      // Details
+            ])
+            .split(area);
+        
+        // Title
+        let title = Paragraph::new("📊 Model Details")
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::BOTTOM));
+        f.render_widget(title, chunks[0]);
+        
+        // Get selected model details
+        if let Some(model) = self.displayed_models.get(self.selected_index) {
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled("Model: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(&model.id),
+                ]),
+                Line::from(vec![
+                    Span::styled("Provider: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(&model.provider, Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Capabilities: ", Style::default().add_modifier(Modifier::BOLD)),
+                ]),
+            ];
+            
+            for cap in &model.capabilities {
+                lines.push(Line::from(vec![
+                    Span::raw("  • "),
+                    Span::styled(format!("{:?}", cap), Style::default().fg(Color::Green)),
+                ]));
+            }
+            
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Statistics: ", Style::default().add_modifier(Modifier::BOLD)),
+            ]));
+            
+            // Use performance metrics directly from model
+            if model.performance.latency_ms.is_some() || model.performance.tokens_per_second.is_some() {
+                if let Some(latency) = model.performance.latency_ms {
+                    lines.push(Line::from(vec![
+                        Span::raw("  Latency: "),
+                        Span::styled(format!("{:.0}ms", latency), Style::default().fg(Color::Yellow)),
+                    ]));
+                }
+                if let Some(tps) = model.performance.tokens_per_second {
+                    lines.push(Line::from(vec![
+                        Span::raw("  Throughput: "),
+                        Span::styled(format!("{:.0} tokens/sec", tps), Style::default().fg(Color::Cyan)),
+                    ]));
+                }
+                if let Some(accuracy) = model.performance.accuracy_score {
+                    lines.push(Line::from(vec![
+                        Span::raw("  Accuracy Score: "),
+                        Span::styled(format!("{:.1}%", accuracy * 100.0), Style::default().fg(Color::Green)),
+                    ]));
+                }
+            } else {
+                lines.push(Line::from("  No performance data available"));
+            }
+            
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Press ESC to return to browse mode", Style::default().fg(Color::DarkGray)),
+            ]));
+            
+            let details = Paragraph::new(lines)
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(" Model Information "));
+            f.render_widget(details, chunks[1]);
+        }
+    }
+}
+
 impl SubtabController for EnhancedModelsTab {
     fn render(&mut self, f: &mut Frame, area: Rect) {
         match self.view_mode {
             ViewMode::Browse => self.render_browse_view(f, area),
             ViewMode::Details => {
-                // TODO: Implement detailed view
-                self.render_browse_view(f, area)
+                self.render_details_view(f, area)
             }
             ViewMode::Benchmark => {
-                // TODO: Implement benchmark view
-                self.render_browse_view(f, area)
+                self.render_benchmark_view(f, area)
             }
             ViewMode::Compare => {
-                // TODO: Implement comparison view
-                self.render_browse_view(f, area)
+                self.render_compare_view(f, area)
             }
             ViewMode::Search => self.render_browse_view(f, area),
         }
@@ -438,8 +705,10 @@ impl SubtabController for EnhancedModelsTab {
                     Some(ModelCategory::Code) => Some(ModelCategory::Vision),
                     Some(ModelCategory::Vision) => Some(ModelCategory::Audio),
                     Some(ModelCategory::Audio) => Some(ModelCategory::Embedding),
-                    Some(ModelCategory::Embedding) => Some(ModelCategory::Specialized),
-                    Some(ModelCategory::Specialized) => None,
+                    Some(ModelCategory::Embedding) => Some(ModelCategory::Instruct),
+                    Some(ModelCategory::Instruct) => Some(ModelCategory::Video),
+                    Some(ModelCategory::Video) => Some(ModelCategory::General),
+                    Some(ModelCategory::General) => None,
                 };
                 self.update_displayed_models();
             }

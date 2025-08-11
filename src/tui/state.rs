@@ -301,7 +301,7 @@ pub struct AppState {
     // Utilities and system management state
     pub utilities_view: UtilitiesViewState,
     pub utilities_tabs: SubTabManager,
-    pub utilities_manager: crate::tui::tabs::utilities::UtilitiesManager,
+    pub utilities_manager: crate::tui::utilities::ModularUtilities,
     pub selected_tool_tab: Option<usize>,
 
     // Story visualization
@@ -1060,7 +1060,7 @@ impl AppState {
                 SubTab { name: "Plugins".to_string(), key: "plugins".to_string() },
                 SubTab { name: "Daemon".to_string(), key: "daemon".to_string() },
             ]),
-            utilities_manager: crate::tui::tabs::utilities::UtilitiesManager::new(),
+            utilities_manager: crate::tui::utilities::ModularUtilities::new(),
             selected_tool_tab: Some(0),
 
             // Initialize stories tab

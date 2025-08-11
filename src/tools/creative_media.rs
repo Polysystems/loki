@@ -231,7 +231,6 @@ pub enum ExpressionType {
 }
 
 /// Creative media manager
-#[derive(Debug)]
 pub struct CreativeMediaManager {
     config: CreativeMediaConfig,
     cognitive_system: Arc<CognitiveSystem>,

@@ -99,6 +99,7 @@ pub mod story_driven_testing;
 // Re-exports for cross-module compatibility
 pub use orchestrator::{
     AttentionTarget,
+    CognitiveMetrics,
     CorrelationFactor,
     CrossSystemAnalysis,
     PerformanceMetrics,
@@ -1269,6 +1270,7 @@ pub enum ThoughtType {
     Social,
     Planning,
     Communication,
+    Reasoning,
 }
 
 /// Metadata for thoughts
@@ -1378,7 +1380,6 @@ impl Default for CognitiveConfig {
     }
 }
 /// Main cognitive system that integrates all components
-#[derive(Debug)]
 pub struct CognitiveSystem {
     /// Compute resource manager
     compute_manager: Arc<ComputeManager>,

@@ -9,7 +9,6 @@ use serde_json::Value;
 use anyhow::Result;
 
 use crate::tui::event_bus::{SystemEvent, TabId};
-use crate::memory::MemoryItem;
 
 /// Retrieval result from memory system
 #[derive(Debug, Clone)]

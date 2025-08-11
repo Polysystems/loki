@@ -477,6 +477,9 @@ impl StoryAnalytics {
             PlotType::Progress { .. } => "Progress",
             PlotType::Analysis { .. } => "Analysis",
             PlotType::Action { .. } => "Action",
+            PlotType::Reasoning { .. } => "Reasoning",
+            PlotType::Event { .. } => "Event",
+            PlotType::Context { .. } => "Context",
         }.to_string()
     }
     

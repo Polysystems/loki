@@ -81,6 +81,7 @@ impl ActiveSession {
             prefer_local: false,
             require_streaming: false,
             required_capabilities: Vec::new(),
+            task_hint: None,
             creativity_level: None,
             formality_level: None,
             target_audience: None,

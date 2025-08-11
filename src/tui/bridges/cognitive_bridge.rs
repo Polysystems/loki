@@ -11,7 +11,7 @@ use anyhow::Result;
 use crate::tui::event_bus::{SystemEvent, TabId};
 use crate::cognitive::{Insight};
 use crate::cognitive::reasoning::advanced_reasoning::{ReasoningChain, ReasoningStep, ReasoningRule, ReasoningType};
-use crate::cognitive::goal_manager::{Goal, GoalId, Priority, GoalType, GoalState, SuccessCriterion, ResourceRequirements};
+use crate::cognitive::goal_manager::{Goal, GoalId, Priority, GoalType, GoalState, ResourceRequirements};
 use std::time::Instant;
 
 /// Goal status enumeration

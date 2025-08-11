@@ -405,7 +405,7 @@ fn count_branches(expr: &syn::Expr) -> u32 {
     }
 }
 
-/// Python analyzer (placeholder)
+/// Python analyzer
 struct PythonAnalyzer;
 
 impl PythonAnalyzer {
@@ -560,7 +560,7 @@ impl LanguageAnalyzer for PythonAnalyzer {
     }
 }
 
-/// JavaScript analyzer (placeholder)
+/// JavaScript analyzer
 struct JavaScriptAnalyzer;
 
 impl JavaScriptAnalyzer {
@@ -762,7 +762,7 @@ impl JavaScriptAnalyzer {
     }
 }
 
-/// TypeScript analyzer (placeholder)
+/// TypeScript analyzer
 struct TypeScriptAnalyzer;
 
 impl TypeScriptAnalyzer {

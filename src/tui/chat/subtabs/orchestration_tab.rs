@@ -27,11 +27,32 @@ pub struct OrchestrationTab {
     /// Edit mode
     edit_mode: bool,
     
+    /// Model selection mode
+    model_selection_mode: bool,
+    
+    /// Selected model index (for model selection)
+    model_selection_index: usize,
+    
+    /// Available models
+    available_models: Vec<ModelInfo>,
+    
+    /// Selected models
+    selected_models: Vec<String>,
+    
     /// Input buffer for editing
     input_buffer: String,
     
     /// Available configuration options
     config_options: Vec<ConfigOption>,
+}
+
+#[derive(Debug, Clone)]
+struct ModelInfo {
+    name: String,
+    provider: String,
+    is_local: bool,
+    has_gpu: bool,
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +66,10 @@ enum ConfigOption {
     ToggleStreaming,
     ConfigureRetries,
     ModelSelection,
+    OrchestrationMode,
+    SelectAllLocal,
+    SelectAllAPI,
+    ClearSelection,
 }
 
 impl OrchestrationTab {
@@ -52,6 +77,11 @@ impl OrchestrationTab {
     pub fn new(manager: Arc<RwLock<OrchestrationManager>>) -> Self {
         let config_options = vec![
             ConfigOption::ToggleOrchestration,
+            ConfigOption::OrchestrationMode,
+            ConfigOption::ModelSelection,
+            ConfigOption::SelectAllLocal,
+            ConfigOption::SelectAllAPI,
+            ConfigOption::ClearSelection,
             ConfigOption::SelectStrategy,
             ConfigOption::SetParallelAgents,
             ConfigOption::ToggleFallback,
@@ -59,16 +89,99 @@ impl OrchestrationTab {
             ConfigOption::SetTemperature,
             ConfigOption::ToggleStreaming,
             ConfigOption::ConfigureRetries,
-            ConfigOption::ModelSelection,
         ];
+        
+        // Initialize with some example models
+        let available_models = Self::discover_available_models();
+        
+        // Initialize selected models from the manager
+        let selected_models = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mgr = manager.read().await;
+                mgr.enabled_models.clone()
+            })
+        });
         
         Self {
             manager,
             selected_index: 0,
             edit_mode: false,
+            model_selection_mode: false,
+            model_selection_index: 0,
+            available_models,
+            selected_models,
             input_buffer: String::new(),
             config_options,
         }
+    }
+    
+    /// Discover available models from various sources
+    fn discover_available_models() -> Vec<ModelInfo> {
+        let mut models = Vec::new();
+        
+        // Check for Ollama models
+        if let Ok(output) = std::process::Command::new("ollama")
+            .arg("list")
+            .output()
+        {
+            if output.status.success() {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                for line in output_str.lines().skip(1) {
+                    if let Some(model_name) = line.split_whitespace().next() {
+                        if !model_name.is_empty() {
+                            models.push(ModelInfo {
+                                name: model_name.to_string(),
+                                provider: "ollama".to_string(),
+                                is_local: true,
+                                has_gpu: cfg!(any(feature = "cuda", feature = "metal")),
+                                capabilities: vec!["chat".to_string(), "completion".to_string()],
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Add API models if keys are configured
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            models.extend(vec![
+                ModelInfo {
+                    name: "gpt-4".to_string(),
+                    provider: "openai".to_string(),
+                    is_local: false,
+                    has_gpu: false,
+                    capabilities: vec!["chat".to_string(), "code".to_string(), "reasoning".to_string()],
+                },
+                ModelInfo {
+                    name: "gpt-4-turbo".to_string(),
+                    provider: "openai".to_string(),
+                    is_local: false,
+                    has_gpu: false,
+                    capabilities: vec!["chat".to_string(), "code".to_string(), "fast".to_string()],
+                },
+            ]);
+        }
+        
+        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+            models.extend(vec![
+                ModelInfo {
+                    name: "claude-3-opus".to_string(),
+                    provider: "anthropic".to_string(),
+                    is_local: false,
+                    has_gpu: false,
+                    capabilities: vec!["chat".to_string(), "code".to_string(), "analysis".to_string()],
+                },
+                ModelInfo {
+                    name: "claude-3-sonnet".to_string(),
+                    provider: "anthropic".to_string(),
+                    is_local: false,
+                    has_gpu: false,
+                    capabilities: vec!["chat".to_string(), "balanced".to_string()],
+                },
+            ]);
+        }
+        
+        models
     }
     
     /// Render the configuration panel
@@ -246,7 +359,36 @@ impl OrchestrationTab {
             ConfigOption::ModelSelection => (
                 "🤖",
                 "Model Selection",
-                format!("{} models", config.models.len())
+                if self.selected_models.is_empty() {
+                    "Press Enter to select".to_string()
+                } else {
+                    format!("{} selected", self.selected_models.len())
+                }
+            ),
+            ConfigOption::OrchestrationMode => (
+                "🎭",
+                "Orchestration Mode",
+                match config.parallel_agents {
+                    1 => "Single Model".to_string(),
+                    2..=3 => "Ensemble".to_string(),
+                    4..=5 => "Voting".to_string(),
+                    _ => "Adaptive".to_string(),
+                }
+            ),
+            ConfigOption::SelectAllLocal => (
+                "📍",
+                "Select All Local",
+                "Quick action".to_string()
+            ),
+            ConfigOption::SelectAllAPI => (
+                "☁️",
+                "Select All API",
+                "Quick action".to_string()
+            ),
+            ConfigOption::ClearSelection => (
+                "🗑️",
+                "Clear Selection",
+                "Quick action".to_string()
             ),
         }
     }
@@ -267,6 +409,48 @@ impl OrchestrationTab {
             ConfigOption::ToggleStreaming => {
                 let mut manager = self.manager.write().await;
                 manager.stream_responses = !manager.stream_responses;
+            }
+            ConfigOption::ModelSelection => {
+                // Enter model selection mode
+                self.model_selection_mode = true;
+                self.model_selection_index = 0;
+            }
+            ConfigOption::OrchestrationMode => {
+                // Cycle through orchestration modes
+                let mut manager = self.manager.write().await;
+                manager.parallel_models = match manager.parallel_models {
+                    1 => 3,  // Single -> Ensemble (3 models)
+                    3 => 5,  // Ensemble -> Voting (5 models)
+                    5 => 2,  // Voting -> Sequential (2 models)
+                    _ => 1,  // Back to Single
+                };
+                // Update ensemble configuration based on mode
+                manager.ensemble_enabled = manager.parallel_models > 1;
+            }
+            ConfigOption::SelectAllLocal => {
+                // Select all local models
+                self.selected_models.clear();
+                for model in &self.available_models {
+                    if model.is_local {
+                        self.selected_models.push(model.name.clone());
+                    }
+                }
+                self.update_manager_models().await;
+            }
+            ConfigOption::SelectAllAPI => {
+                // Select all API models
+                self.selected_models.clear();
+                for model in &self.available_models {
+                    if !model.is_local {
+                        self.selected_models.push(model.name.clone());
+                    }
+                }
+                self.update_manager_models().await;
+            }
+            ConfigOption::ClearSelection => {
+                // Clear all selected models
+                self.selected_models.clear();
+                self.update_manager_models().await;
             }
             _ => {
                 // Enter edit mode for other options
@@ -337,10 +521,110 @@ impl OrchestrationTab {
         self.input_buffer.clear();
         Ok(())
     }
+    
+    /// Update the manager with selected models
+    async fn update_manager_models(&self) {
+        let mut manager = self.manager.write().await;
+        manager.enabled_models = self.selected_models.clone();
+    }
+    
+    /// Render model selection UI
+    fn render_model_selection(&mut self, f: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),  // Title
+                Constraint::Min(10),    // Models list
+                Constraint::Length(3),  // Help
+            ])
+            .split(area);
+        
+        // Title
+        let title = Paragraph::new("🤖 Select Models for Orchestration")
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::BOTTOM));
+        f.render_widget(title, chunks[0]);
+        
+        // Models list with checkboxes
+        let items: Vec<ListItem> = self.available_models
+            .iter()
+            .enumerate()
+            .map(|(i, model)| {
+                let selected = i == self.model_selection_index;
+                let checked = self.selected_models.contains(&model.name);
+                
+                let checkbox = if checked { "✅" } else { "☐" };
+                let gpu_icon = if model.has_gpu { "🚀" } else { "" };
+                let location = if model.is_local { "📍" } else { "☁️" };
+                
+                let line = format!(
+                    "{} {} {} {} ({}) {} - {}",
+                    if selected { "▶" } else { " " },
+                    checkbox,
+                    location,
+                    model.name,
+                    model.provider,
+                    gpu_icon,
+                    model.capabilities.join(", ")
+                );
+                
+                let style = if selected {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else if checked {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default()
+                };
+                
+                ListItem::new(line).style(style)
+            })
+            .collect();
+        
+        let list = List::new(items)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(format!(" {} models available, {} selected ", 
+                    self.available_models.len(),
+                    self.selected_models.len()
+                )));
+        f.render_widget(list, chunks[1]);
+        
+        // Help text
+        let help = vec![
+            Line::from(vec![
+                Span::styled("[Space]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Toggle  "),
+                Span::styled("[a]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Select All  "),
+                Span::styled("[l]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Local Only  "),
+                Span::styled("[c]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Clear  "),
+                Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Confirm  "),
+                Span::styled("[Esc]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Cancel"),
+            ]),
+        ];
+        
+        let help_widget = Paragraph::new(help)
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::TOP));
+        f.render_widget(help_widget, chunks[2]);
+    }
 }
 
 impl SubtabController for OrchestrationTab {
     fn render(&mut self, f: &mut Frame, area: Rect) {
+        // If in model selection mode, render that instead
+        if self.model_selection_mode {
+            self.render_model_selection(f, area);
+            return;
+        }
+        
         // Use tokio's block_on to get the config synchronously for rendering
         let config = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -373,7 +657,63 @@ impl SubtabController for OrchestrationTab {
     }
     
     fn handle_input(&mut self, key: KeyEvent) -> Result<()> {
-        if self.edit_mode {
+        // Handle model selection mode
+        if self.model_selection_mode {
+            match key.code {
+                KeyCode::Up => {
+                    if self.model_selection_index > 0 {
+                        self.model_selection_index -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if self.model_selection_index < self.available_models.len() - 1 {
+                        self.model_selection_index += 1;
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    // Toggle model selection
+                    if let Some(model) = self.available_models.get(self.model_selection_index) {
+                        if let Some(pos) = self.selected_models.iter().position(|m| m == &model.name) {
+                            self.selected_models.remove(pos);
+                        } else {
+                            self.selected_models.push(model.name.clone());
+                        }
+                    }
+                }
+                KeyCode::Char('a') => {
+                    // Select all models
+                    self.selected_models.clear();
+                    for model in &self.available_models {
+                        self.selected_models.push(model.name.clone());
+                    }
+                }
+                KeyCode::Char('l') => {
+                    // Select all local models
+                    self.selected_models.clear();
+                    for model in &self.available_models {
+                        if model.is_local {
+                            self.selected_models.push(model.name.clone());
+                        }
+                    }
+                }
+                KeyCode::Char('c') => {
+                    // Clear selection
+                    self.selected_models.clear();
+                }
+                KeyCode::Enter => {
+                    // Confirm selection and update manager
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(self.update_manager_models())
+                    });
+                    self.model_selection_mode = false;
+                }
+                KeyCode::Esc => {
+                    // Cancel without saving
+                    self.model_selection_mode = false;
+                }
+                _ => {}
+            }
+        } else if self.edit_mode {
             match key.code {
                 KeyCode::Char(c) => {
                     self.input_buffer.push(c);

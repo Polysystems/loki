@@ -421,8 +421,10 @@ impl SettingsTab {
                     RoutingStrategy::Cost => 4,
                     RoutingStrategy::Speed => 1,
                     RoutingStrategy::Quality => 3,
+                    RoutingStrategy::QualityFirst => 3,
                     RoutingStrategy::Availability => 0,
                     RoutingStrategy::Hybrid => 2,
+                    RoutingStrategy::Adaptive => 2,
                 },
                 options: vec![
                     "Round Robin".to_string(),
@@ -611,7 +613,7 @@ impl SubtabController for SettingsTab {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(self.theme.border))
-                .title(" Categories (Tab to switch) "))
+                .title(" Categories (PgUp/PgDn to switch) "))
             .style(bg_style);
         f.render_widget(category_list, content_chunks[0]);
         
@@ -671,7 +673,7 @@ impl SubtabController for SettingsTab {
             ]
         } else {
             vec![
-                Line::from("↑/↓ Navigate | Space/Enter Toggle/Edit | ←/→ Category | s Save | r Reset"),
+                Line::from("↑/↓ Navigate Items | PgUp/PgDn Switch Category | Space/Enter Toggle/Edit | ←/→ Adjust Values | s Save | r Reset"),
                 Line::from("For bool: Space to toggle | For numbers: ←/→ to adjust or Enter to edit | For strings: Enter to edit"),
             ]
         };
@@ -783,54 +785,98 @@ impl SubtabController for SettingsTab {
                     }
                 }
                 
-                // Combined Left arrow handling: category switching and value modification
+                // Left arrow: decrement numeric values
                 KeyCode::Left => {
-                    // Check if we have an item selected that can be modified
                     let category_items = self.get_category_items();
                     if let Some(item) = category_items.get(self.selected_index) {
                         let item_name = item.name.clone();
                         if let Some(mut_item) = self.items.iter_mut().find(|i| i.name == item_name) {
-                            // If item supports decrement, modify value
                             if mut_item.value.can_decrement() {
                                 mut_item.value.decrement();
                                 let item_clone = mut_item.clone();
                                 self.update_setting_value(&item_clone);
                                 self.has_changes = true;
-                            } else {
-                                // Otherwise, switch to previous category
-                                let categories = SettingCategory::all();
-                                let current_idx = categories.iter().position(|c| *c == self.current_category).unwrap_or(0);
-                                let prev_idx = if current_idx > 0 { current_idx - 1 } else { categories.len() - 1 };
-                                self.current_category = categories[prev_idx];
-                                self.selected_index = 0;
+                                self.toast_manager.add_toast(
+                                    format!("Decreased {}", item_name),
+                                    ToastType::Info
+                                );
                             }
                         }
                     }
                 }
                 
-                // Combined Right arrow handling: category switching and value modification
+                // Right arrow: increment numeric values
                 KeyCode::Right => {
-                    // Check if we have an item selected that can be modified
                     let category_items = self.get_category_items();
                     if let Some(item) = category_items.get(self.selected_index) {
                         let item_name = item.name.clone();
                         if let Some(mut_item) = self.items.iter_mut().find(|i| i.name == item_name) {
-                            // If item supports increment, modify value
                             if mut_item.value.can_increment() {
                                 mut_item.value.increment();
                                 let item_clone = mut_item.clone();
                                 self.update_setting_value(&item_clone);
                                 self.has_changes = true;
-                            } else {
-                                // Otherwise, switch to next category
-                                let categories = SettingCategory::all();
-                                let current_idx = categories.iter().position(|c| *c == self.current_category).unwrap_or(0);
-                                let next_idx = (current_idx + 1) % categories.len();
-                                self.current_category = categories[next_idx];
-                                self.selected_index = 0;
+                                self.toast_manager.add_toast(
+                                    format!("Increased {}", item_name),
+                                    ToastType::Info
+                                );
                             }
                         }
                     }
+                }
+                
+                // Category navigation with PageUp/PageDown
+                KeyCode::PageUp => {
+                    // Switch to previous category
+                    let categories = SettingCategory::all();
+                    let current_idx = categories.iter().position(|c| *c == self.current_category).unwrap_or(0);
+                    let prev_idx = if current_idx > 0 { current_idx - 1 } else { categories.len() - 1 };
+                    self.current_category = categories[prev_idx];
+                    self.selected_index = 0;
+                    self.toast_manager.add_toast(
+                        format!("Category: {}", self.current_category.name()),
+                        ToastType::Info
+                    );
+                }
+                
+                KeyCode::PageDown => {
+                    // Switch to next category
+                    let categories = SettingCategory::all();
+                    let current_idx = categories.iter().position(|c| *c == self.current_category).unwrap_or(0);
+                    let next_idx = (current_idx + 1) % categories.len();
+                    self.current_category = categories[next_idx];
+                    self.selected_index = 0;
+                    self.toast_manager.add_toast(
+                        format!("Category: {}", self.current_category.name()),
+                        ToastType::Info
+                    );
+                }
+                
+                // Category navigation with brackets (alternative)
+                KeyCode::Char('[') => {
+                    // Switch to previous category
+                    let categories = SettingCategory::all();
+                    let current_idx = categories.iter().position(|c| *c == self.current_category).unwrap_or(0);
+                    let prev_idx = if current_idx > 0 { current_idx - 1 } else { categories.len() - 1 };
+                    self.current_category = categories[prev_idx];
+                    self.selected_index = 0;
+                    self.toast_manager.add_toast(
+                        format!("Category: {}", self.current_category.name()),
+                        ToastType::Info
+                    );
+                }
+                
+                KeyCode::Char(']') => {
+                    // Switch to next category
+                    let categories = SettingCategory::all();
+                    let current_idx = categories.iter().position(|c| *c == self.current_category).unwrap_or(0);
+                    let next_idx = (current_idx + 1) % categories.len();
+                    self.current_category = categories[next_idx];
+                    self.selected_index = 0;
+                    self.toast_manager.add_toast(
+                        format!("Category: {}", self.current_category.name()),
+                        ToastType::Info
+                    );
                 }
                 
                 // Value modification with Space/Enter

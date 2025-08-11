@@ -66,8 +66,10 @@ pub mod chat;
 pub mod cognitive;
 pub mod nlp;
 pub mod monitoring;
+pub mod utilities;  // New modular utilities system
 pub mod ui;  // Will be removed after migration
 pub mod tabs;  // Moved up from ui/tabs/
+pub mod keybindings;  // Centralized keybinding management
 
 // Backwards compatibility alias
 pub mod connectors {

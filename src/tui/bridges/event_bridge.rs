@@ -106,6 +106,25 @@ impl EventBridge {
                 target_tabs: vec![TabId::Chat, TabId::Home],
                 enabled: true,
             },
+            // Story events route to all relevant tabs
+            RoutingRule {
+                event_type: "StoryProgressed".to_string(),
+                source_tab: None,
+                target_tabs: vec![TabId::Chat, TabId::Home, TabId::Cognitive],
+                enabled: true,
+            },
+            RoutingRule {
+                event_type: "StoryArcChanged".to_string(),
+                source_tab: None,
+                target_tabs: vec![TabId::Chat, TabId::Home, TabId::Cognitive],
+                enabled: true,
+            },
+            RoutingRule {
+                event_type: "StoryTaskCreated".to_string(),
+                source_tab: None,
+                target_tabs: vec![TabId::Chat, TabId::Utilities],
+                enabled: true,
+            },
             // Error events route to all tabs
             RoutingRule {
                 event_type: "ErrorOccurred".to_string(),
@@ -247,6 +266,11 @@ impl EventBridge {
             SystemEvent::ErrorOccurred { .. } => "ErrorOccurred",
             SystemEvent::MetricsUpdated { .. } => "MetricsUpdated",
             SystemEvent::OrchestrationRequested { .. } => "OrchestrationRequested",
+            SystemEvent::StoryProgressed { .. } => "StoryProgressed",
+            SystemEvent::StoryArcChanged { .. } => "StoryArcChanged",
+            SystemEvent::StoryTaskCreated { .. } => "StoryTaskCreated",
+            SystemEvent::StoryNarrativeUpdated { .. } => "StoryNarrativeUpdated",
+            SystemEvent::StoryTodoMapped { .. } => "StoryTodoMapped",
             SystemEvent::OrchestrationCompleted { .. } => "OrchestrationCompleted",
             SystemEvent::CodeEdited { .. } => "CodeEdited",
             SystemEvent::AgentConfig { .. } => "AgentConfig",

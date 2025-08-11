@@ -997,6 +997,7 @@ impl UnifiedCognitiveController {
             GoalType::Strategic => "strategic_planning".to_string(),
             GoalType::Tactical => "tactical_execution".to_string(),
             GoalType::Maintenance => "system_maintenance".to_string(),
+            GoalType::Achievement => "achievement_focused".to_string(),
         }
     }
 

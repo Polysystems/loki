@@ -6,14 +6,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 use super::{AttributionSystem, ContentGenerator, Mention, Suggestion, XClient};
 use crate::cognitive::consciousness_stream::ThermodynamicConsciousnessStream;

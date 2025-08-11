@@ -124,10 +124,10 @@ impl ChatContentRenderer {
     pub fn render_input(&self, f: &mut Frame, area: Rect, chat_manager: &ChatManager) {
         use ratatui::text::{Line, Span};
         
-        // Get input state (placeholder for now)
-        let input_text = "";
-        let cursor_pos = 0;
-        let is_typing = false;
+        // Get input state from chat manager
+        let input_text = chat_manager.get_input_text();
+        let cursor_pos = chat_manager.get_cursor_position();
+        let is_typing = !input_text.is_empty();
         
         // Create input block with dynamic title
         let title = if is_typing {
@@ -147,7 +147,7 @@ impl ChatContentRenderer {
         f.render_widget(input_block, area);
         
         // Create input content with cursor
-        let mut input_line = vec![Span::raw(input_text)];
+        let mut input_line = vec![Span::raw(input_text.clone())];
         
         // Add blinking cursor
         if is_typing {
@@ -189,7 +189,14 @@ impl ChatContentRenderer {
     
     /// Render the context panel if visible
     pub fn render_context(&self, f: &mut Frame, area: Rect, chat_manager: &ChatManager) {
-        if true { // TODO: Get show_context_panel from appropriate location
+        // Get show_context_panel from chat state
+        let show_panel = if let Ok(state) = chat_manager.state.try_read() {
+            state.show_context_panel
+        } else {
+            false
+        };
+        
+        if !show_panel {
             return;
         }
         
@@ -216,8 +223,8 @@ impl ChatRenderer for ChatContentRenderer {
             ])
             .split(area);
             
-        // Create a ChatManager placeholder for rendering
-        let chat_manager = ChatManager::placeholder();
+        // Create a ChatManager with defaults for rendering
+        let chat_manager = ChatManager::with_defaults();
         
         // Render messages area
         self.render_messages(f, chunks[0], &chat_manager);

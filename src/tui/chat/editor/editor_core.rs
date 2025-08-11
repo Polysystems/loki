@@ -160,6 +160,69 @@ enum LineEnding {
 }
 
 impl CodeEditor {
+    /// Get the current file path
+    pub async fn get_file_path(&self) -> Option<String> {
+        let file_info = self.file_info.read().await;
+        file_info.as_ref().map(|info| info.path.clone())
+    }
+    
+    /// Get the current language
+    pub async fn get_language(&self) -> Option<String> {
+        let file_info = self.file_info.read().await;
+        file_info.as_ref().and_then(|info| info.language.clone())
+    }
+    
+    /// Detect language from file extension
+    fn detect_language(path: &str) -> Option<String> {
+        let extension = std::path::Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str())?;
+        
+        let language = match extension {
+            "rs" => "rust",
+            "py" => "python",
+            "js" | "mjs" => "javascript",
+            "ts" => "typescript",
+            "jsx" => "javascriptreact",
+            "tsx" => "typescriptreact",
+            "go" => "go",
+            "c" => "c",
+            "cpp" | "cc" | "cxx" => "cpp",
+            "h" | "hpp" => "cpp",
+            "java" => "java",
+            "cs" => "csharp",
+            "rb" => "ruby",
+            "php" => "php",
+            "swift" => "swift",
+            "kt" | "kts" => "kotlin",
+            "scala" => "scala",
+            "sh" | "bash" => "bash",
+            "zsh" => "zsh",
+            "fish" => "fish",
+            "ps1" => "powershell",
+            "yml" | "yaml" => "yaml",
+            "json" => "json",
+            "xml" => "xml",
+            "html" | "htm" => "html",
+            "css" => "css",
+            "scss" | "sass" => "scss",
+            "less" => "less",
+            "sql" => "sql",
+            "md" | "markdown" => "markdown",
+            "tex" => "latex",
+            "r" => "r",
+            "lua" => "lua",
+            "vim" => "vim",
+            "toml" => "toml",
+            "ini" | "cfg" => "ini",
+            "dockerfile" => "dockerfile",
+            "makefile" | "mk" => "makefile",
+            _ => return None,
+        };
+        
+        Some(language.to_string())
+    }
+    
     /// Create a new code editor
     pub fn new(config: EditorConfig) -> Self {
         Self {
@@ -256,13 +319,13 @@ impl CodeEditor {
             state.modified = false;
             
             drop(file_info); // Now we can safely drop file_info
-            if let Some(mut info) = self.file_info.write().await.as_mut() {
+            if let Some(info) = self.file_info.write().await.as_mut() {
                 info.last_saved = Some(chrono::Utc::now());
             }
             
             info!("Saved file: {}", path); // Use the cloned path
         } else {
-            return Err(anyhow::anyhow!("No file path set"));
+            return Err(anyhow::anyhow!("Cannot save: No file path has been set for the editor"));
         }
         Ok(())
     }
@@ -457,14 +520,16 @@ impl CodeEditor {
             }
             
             if lines.len() > 1 {
-                let last_line = format!("{}{}", lines.last().unwrap(), rest_of_line);
-                state.buffer.insert(position.line + lines.len() - 1, last_line);
+                if let Some(last) = lines.last() {
+                    let last_line = format!("{}{}", last, rest_of_line);
+                    state.buffer.insert(position.line + lines.len() - 1, last_line);
+                }
             }
             
             // Update cursor
             state.cursor = CursorPosition {
                 line: position.line + lines.len() - 1,
-                column: lines.last().unwrap().len(),
+                column: lines.last().map(|l| l.len()).unwrap_or(0),
             };
         } else {
             // Single line insert
@@ -524,9 +589,175 @@ impl CodeEditor {
     pub async fn undo(&self) -> Result<()> {
         let mut history = self.history.write().await;
         if let Some(action) = history.undo_stack.pop_back() {
-            // TODO: Implement reverse action
+            // Create reverse action
+            let reverse_action = self.create_reverse_action(&action).await;
+            
+            // Apply the reverse action
+            drop(history);
+            if let Some(reverse) = reverse_action {
+                self.apply_edit_without_history(reverse).await?;
+            }
+            
+            // Add to redo stack
+            let mut history = self.history.write().await;
             history.redo_stack.push_back(action);
         }
+        Ok(())
+    }
+    
+    /// Create a reverse action for undo
+    async fn create_reverse_action(&self, action: &EditAction) -> Option<EditAction> {
+        let state = self.state.read().await;
+        
+        match action {
+            EditAction::Insert { position, text } => {
+                // Reverse of insert is delete
+                let end_position = self.calculate_end_position(*position, text, &state);
+                Some(EditAction::Delete {
+                    range: SelectionRange {
+                        start: *position,
+                        end: end_position,
+                    }
+                })
+            }
+            EditAction::Delete { range } => {
+                // Reverse of delete requires the deleted text
+                // For now, we can't perfectly restore deleted text without storing it
+                // This would require enhancing the EditAction to store deleted content
+                None
+            }
+            EditAction::Replace { range, text: _ } => {
+                // Similar issue - we need the original text to reverse a replace
+                None
+            }
+            EditAction::MoveCursor { position: _ } => {
+                // Cursor movement doesn't need reversal in undo
+                None
+            }
+            EditAction::Select { range: _ } => {
+                // Selection doesn't need reversal in undo
+                None
+            }
+            EditAction::Indent { lines } => {
+                // Reverse of indent is unindent
+                Some(EditAction::Unindent { lines: lines.clone() })
+            }
+            EditAction::Unindent { lines } => {
+                // Reverse of unindent is indent
+                Some(EditAction::Indent { lines: lines.clone() })
+            }
+            EditAction::Comment { lines } => {
+                // Reverse of comment is uncomment
+                Some(EditAction::Uncomment { lines: lines.clone() })
+            }
+            EditAction::Uncomment { lines } => {
+                // Reverse of uncomment is comment
+                Some(EditAction::Comment { lines: lines.clone() })
+            }
+        }
+    }
+    
+    /// Calculate end position after inserting text
+    fn calculate_end_position(&self, start: CursorPosition, text: &str, _state: &EditorState) -> CursorPosition {
+        let lines: Vec<&str> = text.split('\n').collect();
+        if lines.len() == 1 {
+            CursorPosition {
+                line: start.line,
+                column: start.column + lines[0].len(),
+            }
+        } else {
+            CursorPosition {
+                line: start.line + lines.len() - 1,
+                column: lines.last().map(|l| l.len()).unwrap_or(0),
+            }
+        }
+    }
+    
+    /// Insert text at position (async wrapper)
+    async fn insert_at_position(&self, position: CursorPosition, text: &str) {
+        let mut state = self.state.write().await;
+        self.insert_text(&mut state, position, text);
+        state.modified = true;
+    }
+    
+    /// Delete range async wrapper (different name to avoid conflict)
+    async fn delete_range_async(&self, range: SelectionRange) {
+        let mut state = self.state.write().await;
+        self.delete_range(&mut state, range);
+        state.modified = true;
+    }
+    
+    /// Apply edit without recording to history (for undo/redo)
+    async fn apply_edit_without_history(&self, action: EditAction) -> Result<()> {
+        match action {
+            EditAction::Insert { position, text } => {
+                self.insert_at_position(position, &text).await;
+            }
+            EditAction::Delete { range } => {
+                self.delete_range_async(range).await;
+            }
+            EditAction::Replace { range, text } => {
+                self.delete_range_async(range).await;
+                self.insert_at_position(range.start, &text).await;
+            }
+            EditAction::MoveCursor { position } => {
+                let mut state = self.state.write().await;
+                state.cursor = position;
+            }
+            EditAction::Select { range } => {
+                let mut state = self.state.write().await;
+                state.selection = Some(range);
+            }
+            EditAction::Indent { ref lines } => {
+                let mut state = self.state.write().await;
+                for &line_idx in lines {
+                    if line_idx < state.buffer.len() {
+                        state.buffer[line_idx].insert_str(0, "    ");
+                    }
+                }
+                state.modified = true;
+            }
+            EditAction::Unindent { ref lines } => {
+                let mut state = self.state.write().await;
+                for &line_idx in lines {
+                    if line_idx < state.buffer.len() {
+                        let line = &mut state.buffer[line_idx];
+                        if line.starts_with("    ") {
+                            line.drain(0..4);
+                        } else if line.starts_with('\t') {
+                            line.drain(0..1);
+                        }
+                    }
+                }
+                state.modified = true;
+            }
+            EditAction::Comment { ref lines } => {
+                let comment_str = self.get_comment_string().await;
+                let mut state = self.state.write().await;
+                for &line_idx in lines {
+                    if line_idx < state.buffer.len() {
+                        state.buffer[line_idx].insert_str(0, &format!("{} ", comment_str));
+                    }
+                }
+                state.modified = true;
+            }
+            EditAction::Uncomment { ref lines } => {
+                let comment_str = self.get_comment_string().await;
+                let mut state = self.state.write().await;
+                for &line_idx in lines {
+                    if line_idx < state.buffer.len() {
+                        let line = &mut state.buffer[line_idx];
+                        if line.starts_with(&format!("{} ", comment_str)) {
+                            line.drain(0..comment_str.len() + 1);
+                        } else if line.starts_with(&comment_str) {
+                            line.drain(0..comment_str.len());
+                        }
+                    }
+                }
+                state.modified = true;
+            }
+        }
+        
         Ok(())
     }
     
@@ -551,7 +782,7 @@ impl CodeEditor {
         }
         
         // Ensure final newline
-        if !state.buffer.is_empty() && !state.buffer.last().unwrap().is_empty() {
+        if state.buffer.last().map(|l| !l.is_empty()).unwrap_or(false) {
             state.buffer.push(String::new());
         }
         
@@ -736,28 +967,6 @@ impl CodeEditor {
         }
     }
     
-    /// Detect language from file extension
-    fn detect_language(path: &str) -> Option<String> {
-        let extension = path.split('.').last()?;
-        Some(match extension {
-            "rs" => "rust",
-            "py" => "python",
-            "js" => "javascript",
-            "ts" => "typescript",
-            "html" => "html",
-            "css" => "css",
-            "json" => "json",
-            "md" => "markdown",
-            "yaml" | "yml" => "yaml",
-            "toml" => "toml",
-            "sh" | "bash" => "bash",
-            "go" => "go",
-            "java" => "java",
-            "c" => "c",
-            "cpp" | "cc" | "cxx" => "cpp",
-            _ => return None,
-        }.to_string())
-    }
     
     /// Get current cursor position
     pub async fn get_cursor(&self) -> CursorPosition {

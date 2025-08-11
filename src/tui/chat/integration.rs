@@ -17,6 +17,9 @@ use super::subtabs::{
 use super::{ChatState, OrchestrationManager, AgentManager};
 use super::processing::MessageProcessor;
 use super::ui_enhancements::KeyboardShortcutsOverlay;
+use crate::tasks::{TaskRegistry, TaskContext};
+use crate::config::Config;
+use crate::models::ModelManager;
 
 /// Direct subtab manager without bridge pattern
 pub struct SubtabManager {
@@ -71,7 +74,7 @@ impl SubtabManager {
         )
     }
     
-    /// Create a new subtab manager with discovery engines
+    /// Create a new subtab manager with discovery engines and task support
     pub fn new_with_discovery(
         chat_state: Arc<RwLock<ChatState>>,
         orchestration: Arc<RwLock<OrchestrationManager>>,
@@ -80,6 +83,35 @@ impl SubtabManager {
         available_models: Vec<crate::tui::chat::ActiveModel>,
         model_discovery: Option<Arc<crate::tui::chat::models::discovery::ModelDiscoveryEngine>>,
         agent_wizard: Option<Arc<crate::tui::chat::agents::creation::AgentCreationWizard>>,
+    ) -> Self {
+        Self::new_with_full_support(
+            chat_state,
+            orchestration,
+            agent_manager,
+            message_tx,
+            available_models,
+            model_discovery,
+            agent_wizard,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    
+    /// Create a new subtab manager with full support including tasks
+    pub fn new_with_full_support(
+        chat_state: Arc<RwLock<ChatState>>,
+        orchestration: Arc<RwLock<OrchestrationManager>>,
+        agent_manager: Arc<RwLock<AgentManager>>,
+        message_tx: mpsc::Sender<(String, usize)>,
+        available_models: Vec<crate::tui::chat::ActiveModel>,
+        model_discovery: Option<Arc<crate::tui::chat::models::discovery::ModelDiscoveryEngine>>,
+        agent_wizard: Option<Arc<crate::tui::chat::agents::creation::AgentCreationWizard>>,
+        task_registry: Option<Arc<TaskRegistry>>,
+        task_context: Option<TaskContext>,
+        model_orchestrator: Option<Arc<crate::models::ModelOrchestrator>>,
+        ollama_manager: Option<Arc<crate::ollama::OllamaManager>>,
     ) -> Self {
         // Create internal message channel for processing
         let (internal_tx, message_rx) = mpsc::channel(100);
@@ -101,14 +133,120 @@ impl SubtabManager {
         let mut agents_tab = AgentsTab::new();
         agents_tab.set_references(orchestration.clone(), agent_manager.clone());
         
-        // Create models tab with optional discovery engine
-        let models_tab = if let Some(discovery) = model_discovery {
-            ModelsTab::new_with_discovery(orchestration.clone(), Some(discovery), available_models)
+        // Create models tab with proper orchestrator
+        let models_tab = if let Some(ref orchestrator) = model_orchestrator {
+            let mut tab = ModelsTab::new(orchestrator.clone());
+            if let Some(ref ollama) = ollama_manager {
+                tab.set_ollama_manager(ollama.clone());
+            }
+            // Initialize the models tab
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    if let Err(e) = tab.initialize().await {
+                        tracing::warn!("Failed to initialize models tab: {}", e);
+                    }
+                })
+            });
+            tab
         } else {
-            ModelsTab::new(orchestration.clone(), available_models)
+            // Fallback: create with default orchestrator
+            let default_orchestrator = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    crate::models::ModelOrchestrator::new(&crate::config::ApiKeysConfig::default()).await
+                })
+            });
+            
+            match default_orchestrator {
+                Ok(orchestrator) => ModelsTab::new(Arc::new(orchestrator)),
+                Err(e) => {
+                    // Log error and create a minimal ModelsTab that can display the error state
+                    tracing::error!("Failed to create ModelOrchestrator for models tab: {}", e);
+                    tracing::warn!("Creating models tab in degraded mode - functionality will be limited");
+                    
+                    // Try to create with a minimal orchestrator that won't fail
+                    // This allows the UI to still load and show an error state
+                    let minimal_orchestrator = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            // Create with empty config - this should always succeed
+                            crate::models::ModelOrchestrator::new(&crate::config::ApiKeysConfig {
+                                github: None,
+                                x_twitter: None,
+                                ai_models: crate::config::AiModelsConfig {
+                                    openai: None,
+                                    anthropic: None,
+                                    deepseek: None,
+                                    mistral: None,
+                                    codestral: None,
+                                    gemini: None,
+                                    grok: None,
+                                    cohere: None,
+                                    perplexity: None,
+                                },
+                                embedding_models: Default::default(),
+                                search: Default::default(),
+                                vector_db: None,
+                                optional_services: Default::default(),
+                            }).await
+                        })
+                    });
+                    
+                    // If even the minimal orchestrator fails, create a stub tab
+                    match minimal_orchestrator {
+                        Ok(orchestrator) => {
+                            let mut tab = ModelsTab::new(Arc::new(orchestrator));
+                            // Could add error state flag here if ModelsTab supports it
+                            tracing::info!("Created models tab with minimal orchestrator");
+                            tab
+                        },
+                        Err(e2) => {
+                            // Last resort: create a degraded models tab
+                            tracing::error!("Even minimal orchestrator failed: {}", e2);
+                            tracing::error!("Models tab will be created in error state");
+                            
+                            // Create a basic models tab that can at least display
+                            // In production, ModelsTab should handle None orchestrator gracefully
+                            // For now, we create with the most basic possible orchestrator
+                            // that was created earlier (even if it's not fully functional)
+                            if let Ok(basic_orch) = tokio::task::block_in_place(|| {
+                                tokio::runtime::Handle::current().block_on(async {
+                                    crate::models::ModelOrchestrator::new(&Default::default()).await
+                                })
+                            }) {
+                                ModelsTab::new(Arc::new(basic_orch))
+                            } else {
+                                // If all else fails, create with absolutely minimal config
+                                // This should be improved to handle error states better
+                                tracing::error!("All attempts to create orchestrator failed - creating minimal ModelsTab");
+                                
+                                // Create the most basic possible orchestrator synchronously
+                                let basic_config = crate::config::ApiKeysConfig::default();
+                                if let Ok(basic_orch) = tokio::task::block_in_place(|| {
+                                    tokio::runtime::Handle::current().block_on(async {
+                                        crate::models::ModelOrchestrator::new(&basic_config).await
+                                    })
+                                }) {
+                                    ModelsTab::new(Arc::new(basic_orch))
+                                } else {
+                                    panic!("Unable to create even the most basic orchestrator - this should never happen");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         };
         
-        // TODO: Update agents_tab with agent_wizard when AgentsTab supports it
+        // Note: agents_tab will be updated with agent_wizard when AgentsTab supports it
+        // This is tracked as a future enhancement
+        
+        // Create CLI tab with task support if available
+        let mut cli_tab = CliTab::new();
+        if let Some(registry) = task_registry {
+            cli_tab.set_task_registry(registry);
+        }
+        if let Some(context) = task_context {
+            cli_tab.set_task_context(context);
+        }
         
         // Create all tabs
         let tabs: Vec<Box<dyn SubtabController + Send + Sync>> = vec![
@@ -119,7 +257,7 @@ impl SubtabManager {
             Box::new(settings_tab),
             Box::new(OrchestrationTab::new(orchestration.clone())),
             Box::new(agents_tab),
-            Box::new(CliTab::new()),
+            Box::new(cli_tab),
             Box::new(StatisticsTab::new(chat_state.clone())),
         ];
         
@@ -198,30 +336,8 @@ impl SubtabManager {
             return Ok(());
         }
         
-        // Check for subtab navigation with Ctrl+J/K (doesn't conflict with main Tab navigation)
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char('j') => {
-                    // Navigate to previous subtab
-                    if self.current_index > 0 {
-                        self.set_active(self.current_index - 1);
-                    } else {
-                        self.set_active(self.tabs.len() - 1);
-                    }
-                    return Ok(());
-                }
-                KeyCode::Char('k') => {
-                    // Navigate to next subtab
-                    if self.current_index < self.tabs.len() - 1 {
-                        self.set_active(self.current_index + 1);
-                    } else {
-                        self.set_active(0);
-                    }
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
+        // Note: Ctrl+J/K navigation is handled by app.rs to keep indices synchronized
+        // We don't handle it here to avoid conflicts with the main navigation system
         
         // Alt+Left/Right for subtab navigation as alternative
         if key.modifiers.contains(KeyModifiers::ALT) {
@@ -389,6 +505,25 @@ impl SubtabManager {
     ) {
         if let Some(processor) = &mut self.message_processor {
             processor.set_tool_managers(intelligent_tool_manager, task_manager);
+        }
+    }
+    
+    /// Set task support for CLI tab
+    pub fn set_task_support(
+        &mut self,
+        task_registry: Arc<TaskRegistry>,
+        task_context: TaskContext,
+    ) {
+        // CLI tab is at index 7
+        if let Some(tab) = self.tabs.get_mut(7) {
+            // Safe downcast to CliTab to set task support
+            let cli_tab = unsafe {
+                let raw_ptr = tab.as_mut() as *mut dyn SubtabController as *mut CliTab;
+                &mut *raw_ptr
+            };
+            cli_tab.set_task_registry(task_registry);
+            cli_tab.set_task_context(task_context);
+            tracing::info!("🤖 Task support enabled for CLI tab");
         }
     }
     

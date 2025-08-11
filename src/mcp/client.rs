@@ -30,9 +30,10 @@ pub struct McpClient {
 }
 
 /// Configuration for MCP client
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpClientConfig {
     /// Timeout for MCP operations
+    #[serde(with = "humantime_serde")]
     pub timeout: Duration,
     /// Maximum number of concurrent MCP calls
     pub max_concurrent: usize,
@@ -922,6 +923,68 @@ impl McpClient {
         let uptime = Duration::from_secs(3600); // 1 hour placeholder
         let last_active = chrono::Utc::now();
         Ok((uptime, last_active))
+    }
+    
+    /// Register a new MCP server
+    pub async fn register_server(&self, server: McpServer) -> Result<()> {
+        // Note: Since servers is not mutable in the current structure,
+        // this would need to be refactored to use Arc<Mutex<>> or similar
+        // For now, return an error indicating this needs implementation
+        Err(anyhow!("register_server needs refactoring to support mutable server list"))
+    }
+    
+    /// Get status of all registered servers
+    pub async fn get_server_status(&self) -> Vec<crate::mcp::McpServerStatus> {
+        let mut statuses = Vec::new();
+        
+        for (name, server) in &self.servers {
+            let status = if server.enabled {
+                crate::mcp::ConnectionStatus::Active
+            } else {
+                crate::mcp::ConnectionStatus::Disabled
+            };
+            
+            statuses.push(crate::mcp::McpServerStatus {
+                name: server.name.clone(),
+                status,
+                description: server.description.clone(),
+                command: server.command.clone(),
+                args: server.args.clone(),
+                capabilities: server.capabilities.clone(),
+                last_active: chrono::Utc::now(),
+                uptime: Duration::from_secs(0),
+                error_message: None,
+            });
+        }
+        
+        statuses
+    }
+    
+    /// Connect to a specific MCP server
+    pub async fn connect(&self, server_id: &str) -> Result<()> {
+        if !self.servers.contains_key(server_id) {
+            return Err(anyhow!("Server '{}' not found", server_id));
+        }
+        
+        // Check if server is healthy
+        if self.check_server_health(server_id).await? {
+            info!("Connected to MCP server: {}", server_id);
+            Ok(())
+        } else {
+            Err(anyhow!("Failed to connect to server '{}'", server_id))
+        }
+    }
+    
+    /// Disconnect from a specific MCP server
+    pub async fn disconnect(&self, server_id: &str) -> Result<()> {
+        if !self.servers.contains_key(server_id) {
+            return Err(anyhow!("Server '{}' not found", server_id));
+        }
+        
+        // In a real implementation, this would close the connection
+        // For now, just log the disconnection
+        info!("Disconnected from MCP server: {}", server_id);
+        Ok(())
     }
 }
 

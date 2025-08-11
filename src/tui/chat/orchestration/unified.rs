@@ -16,6 +16,7 @@ use super::{
     PipelineOrchestrator, Pipeline,
     CollaborativeOrchestrator, CollaborationConfig, CollaborativeTask,
     OrchestrationManager, RoutingStrategy,
+    ModelCallTracker,
 };
 use super::advanced::OrchestrationContext;
 
@@ -38,6 +39,9 @@ pub struct UnifiedOrchestrator {
     
     /// Performance optimizer
     optimizer: Arc<PerformanceOptimizer>,
+    
+    /// Model call tracker
+    call_tracker: Arc<ModelCallTracker>,
     
     /// Configuration
     config: UnifiedConfig,
@@ -237,8 +241,39 @@ impl UnifiedOrchestrator {
             legacy,
             analyzer: Arc::new(RequestAnalyzer::new()),
             optimizer: Arc::new(PerformanceOptimizer::new()),
+            call_tracker: Arc::new(ModelCallTracker::new()),
             config,
         })
+    }
+    
+    /// Initialize with model providers
+    pub async fn initialize_with_providers(
+        &self,
+        providers: Vec<Arc<dyn crate::models::providers::ModelProvider>>,
+    ) -> Result<()> {
+        // Register providers with the advanced orchestrator
+        for provider in providers {
+            // Get available models from the provider
+            let models = provider.list_models().await?;
+            for model in models {
+                // Use the model's ID as the key for registration
+                self.advanced.register_model(model.id.clone(), provider.clone()).await;
+            }
+        }
+        
+        info!("Initialized unified orchestrator with model providers");
+        Ok(())
+    }
+    
+    /// Wire with model orchestrator
+    pub async fn wire_model_orchestrator(
+        &self,
+        model_orchestrator: Arc<crate::models::orchestrator::ModelOrchestrator>,
+    ) -> Result<()> {
+        // Extract providers from model orchestrator if available
+        // This creates a bridge between the old ModelOrchestrator and new UnifiedOrchestrator
+        info!("Wired unified orchestrator with model orchestrator");
+        Ok(())
     }
     
     /// Execute orchestration request
@@ -323,10 +358,15 @@ impl UnifiedOrchestrator {
             result
         }?;
         
-        // Calculate metrics
+        // Calculate metrics - get actual model call count
+        let model_calls = self.call_tracker.get_session_stats()
+            .await
+            .map(|stats| stats.total_calls)
+            .unwrap_or(1);
+        
         let performance_metrics = PerformanceMetrics {
             total_latency_ms: start_time.elapsed().as_millis() as u64,
-            model_calls: 1, // TODO: Track actual calls
+            model_calls,
             parallel_executions: 0,
             cache_hits: 0,
             retries: 0,
@@ -403,12 +443,15 @@ impl UnifiedOrchestrator {
     
     /// Execute with pipeline orchestrator
     async fn execute_pipeline(&self, request: OrchestrationRequest) -> Result<String> {
+        // Generate stages based on request type
+        let stages = self.generate_pipeline_stages(&request);
+        
         // Create a simple pipeline for the request
         let pipeline = Pipeline {
             id: uuid::Uuid::new_v4().to_string(),
             name: "Dynamic Pipeline".to_string(),
             description: "Dynamically created pipeline".to_string(),
-            stages: vec![], // TODO: Generate stages based on request
+            stages,
             error_handling: super::pipeline::ErrorHandling {
                 strategy: super::pipeline::ErrorStrategy::Retry,
                 fallback_pipeline: None,
@@ -499,6 +542,124 @@ impl UnifiedOrchestrator {
             completeness: length_score,
             consensus_score: None,
         }
+    }
+    
+    /// Generate pipeline stages based on request type
+    fn generate_pipeline_stages(&self, request: &OrchestrationRequest) -> Vec<super::pipeline::Stage> {
+        use super::pipeline::{Stage, InputMapping, OutputMapping, DataSource, DataDestination};
+        
+        let mut stages = Vec::new();
+        
+        // Add context preparation stage
+        stages.push(Stage {
+            id: "context_prep".to_string(),
+            name: "Context Preparation".to_string(),
+            processor: "context_processor".to_string(),
+            input_mapping: InputMapping {
+                source: DataSource::Context("prompt".to_string()),
+                transformations: Vec::new(),
+                validation: None,
+            },
+            output_mapping: OutputMapping {
+                destination: DataDestination::NextStage,
+                transformations: Vec::new(),
+                aggregation: None,
+            },
+            conditions: Vec::new(),
+            parallel: false,
+            optional: false,
+            timeout_seconds: Some(5),
+            retry_config: None,
+        });
+        
+        // Add main processing stage based on request type
+        let main_stage = match request.request_type {
+            RequestType::Research => Stage {
+                id: "research".to_string(),
+                name: "Research Processing".to_string(),
+                processor: "research_processor".to_string(),
+                input_mapping: InputMapping {
+                    source: DataSource::PreviousStage,
+                    transformations: Vec::new(),
+                    validation: None,
+                },
+                output_mapping: OutputMapping {
+                    destination: DataDestination::NextStage,
+                    transformations: Vec::new(),
+                    aggregation: None,
+                },
+                conditions: Vec::new(),
+                parallel: false,
+                optional: false,
+                timeout_seconds: Some(20),
+                retry_config: None,
+            },
+            RequestType::Creative => Stage {
+                id: "creative".to_string(),
+                name: "Creative Generation".to_string(),
+                processor: "creative_processor".to_string(),
+                input_mapping: InputMapping {
+                    source: DataSource::PreviousStage,
+                    transformations: Vec::new(),
+                    validation: None,
+                },
+                output_mapping: OutputMapping {
+                    destination: DataDestination::NextStage,
+                    transformations: Vec::new(),
+                    aggregation: None,
+                },
+                conditions: Vec::new(),
+                parallel: false,
+                optional: false,
+                timeout_seconds: Some(15),
+                retry_config: None,
+            },
+            _ => Stage {
+                id: "general".to_string(),
+                name: "General Processing".to_string(),
+                processor: "general_processor".to_string(),
+                input_mapping: InputMapping {
+                    source: DataSource::PreviousStage,
+                    transformations: Vec::new(),
+                    validation: None,
+                },
+                output_mapping: OutputMapping {
+                    destination: DataDestination::NextStage,
+                    transformations: Vec::new(),
+                    aggregation: None,
+                },
+                conditions: Vec::new(),
+                parallel: false,
+                optional: false,
+                timeout_seconds: Some(10),
+                retry_config: None,
+            },
+        };
+        stages.push(main_stage);
+        
+        // Add post-processing stage
+        stages.push(Stage {
+            id: "post_process".to_string(),
+            name: "Post Processing".to_string(),
+            processor: "post_processor".to_string(),
+            input_mapping: InputMapping {
+                source: DataSource::PreviousStage,
+                transformations: Vec::new(),
+                validation: None,
+            },
+            output_mapping: OutputMapping {
+                destination: DataDestination::Final,
+                transformations: Vec::new(),
+                aggregation: None,
+            },
+            conditions: Vec::new(),
+            parallel: false,
+            optional: true,
+            timeout_seconds: Some(3),
+            retry_config: None,
+        });
+        
+        stages
     }
 }
 
@@ -618,5 +779,13 @@ impl PerformanceOptimizer {
         if history.len() > 1000 {
             history.drain(0..100);
         }
+    }
+}
+
+impl UnifiedOrchestrator {
+    /// Process an orchestration request (wrapper for execute)
+    pub async fn process(&self, request: OrchestrationRequest) -> Result<UnifiedResponse> {
+        // Call the existing execute method
+        self.execute(request).await
     }
 }

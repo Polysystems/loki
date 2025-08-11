@@ -127,7 +127,12 @@ async fn main() -> Result<()> {
                 eprintln!("✅ Compute manager initialized");
 
                 eprintln!("🔄 Initializing stream manager...");
-                let stream_manager = Arc::new(StreamManager::new(config.clone())?);
+                let mut stream_manager = StreamManager::new(config.clone())?;
+                
+                // Note: EventBus will be connected after App initialization
+                // since EventBus is created inside App::new()
+                
+                let stream_manager = Arc::new(stream_manager);
                 eprintln!("✅ Stream manager initialized");
 
                 eprintln!("🔄 Initializing cluster manager...");

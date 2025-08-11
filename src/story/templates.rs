@@ -687,6 +687,20 @@ impl StoryTemplateManager {
                     parameters: parameters.clone(),
                     outcome: String::new(),
                 },
+                PlotType::Reasoning { premise, confidence, .. } => PlotType::Reasoning {
+                    premise: premise.clone(),
+                    conclusion: description,
+                    confidence: *confidence,
+                },
+                PlotType::Event { event_type, impact, .. } => PlotType::Event {
+                    event_type: event_type.clone(),
+                    description,
+                    impact: *impact,
+                },
+                PlotType::Context { context_type, .. } => PlotType::Context {
+                    context_type: context_type.clone(),
+                    data: description,
+                },
             };
             
             story_engine.add_plot_point(

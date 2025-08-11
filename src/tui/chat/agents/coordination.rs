@@ -9,6 +9,8 @@ use anyhow::{Result, anyhow};
 use serde::{Serialize, Deserialize};
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::{Duration, interval};
+use crate::tui::event_bus::{EventBus, SystemEvent, TabId};
+use tracing::{debug, warn, error};
 
 use crate::cognitive::agents::{AgentConfiguration, AgentSpecialization, LoadBalancingStrategy};
 use crate::compute::ComputeManager;
@@ -36,6 +38,9 @@ pub struct AgentCoordinator {
     /// Event channel for coordination events
     event_tx: mpsc::Sender<CoordinationEvent>,
     event_rx: RwLock<mpsc::Receiver<CoordinationEvent>>,
+    
+    /// Event bus for system-wide events
+    event_bus: Option<Arc<EventBus>>,
 }
 
 /// Individual agent in the system
@@ -260,6 +265,50 @@ impl AgentCoordinator {
             specializations: Arc::new(SpecializationRegistry::new()),
             event_tx,
             event_rx: RwLock::new(event_rx),
+            event_bus: None,
+        }
+    }
+    
+    /// Set the event bus for broadcasting agent events
+    pub fn set_event_bus(&mut self, event_bus: Arc<EventBus>) {
+        self.event_bus = Some(event_bus);
+    }
+    
+    /// Broadcast agent creation event
+    async fn broadcast_agent_created(&self, agent_id: &str, specialization: &AgentSpecialization) {
+        if let Some(ref event_bus) = self.event_bus {
+            if let Err(e) = event_bus.publish(SystemEvent::AgentCreated {
+                agent_id: agent_id.to_string(),
+                specialization: specialization.clone(),
+                config: serde_json::json!({}),
+            }).await {
+                warn!("Failed to broadcast agent creation event: {}", e);
+            }
+        }
+    }
+    
+    /// Broadcast task assignment event
+    async fn broadcast_task_assigned(&self, agent_id: &str, task: &CoordinationTask) {
+        if let Some(ref event_bus) = self.event_bus {
+            if let Err(e) = event_bus.publish(SystemEvent::AgentTaskAssigned {
+                agent_id: agent_id.to_string(),
+                task_id: task.id.clone(),
+                task_description: task.description.clone(),
+            }).await {
+                warn!("Failed to broadcast task assignment event: {}", e);
+            }
+        }
+    }
+    
+    /// Broadcast agent status change
+    async fn broadcast_agent_status(&self, agent_id: &str, status: AgentState) {
+        if let Some(ref event_bus) = self.event_bus {
+            if let Err(e) = event_bus.publish(SystemEvent::AgentStatusChanged {
+                agent_id: agent_id.to_string(),
+                status: format!("{:?}", status),
+            }).await {
+                warn!("Failed to broadcast agent status change: {}", e);
+            }
         }
     }
     
@@ -271,12 +320,13 @@ impl AgentCoordinator {
         specialization: AgentSpecialization,
         max_concurrent: usize,
     ) -> Result<()> {
+        debug!("Registering agent: {} ({:?})", id, specialization);
         let mut agents = self.agents.write().await;
         
         let agent = Agent {
             id: id.clone(),
             name,
-            specialization,
+            specialization: specialization.clone(),
             state: AgentState::Idle,
             metrics: AgentMetrics::default(),
             workload: 0.0,
@@ -284,7 +334,11 @@ impl AgentCoordinator {
             active_tasks: Vec::new(),
         };
         
-        agents.insert(id, agent);
+        agents.insert(id.clone(), agent);
+        
+        // Broadcast agent creation event
+        self.broadcast_agent_created(&id, &specialization).await;
+        
         Ok(())
     }
     
@@ -293,6 +347,7 @@ impl AgentCoordinator {
         let mut queue = self.task_queue.write().await;
         
         if queue.len() >= self.config.max_queue_size {
+            error!("Task queue is full: {} tasks (max: {})", queue.len(), self.config.max_queue_size);
             return Err(anyhow!("Task queue is full"));
         }
         
@@ -301,6 +356,7 @@ impl AgentCoordinator {
             let active = self.active_tasks.read().await;
             for dep in &task.dependencies {
                 if !active.contains_key(dep) {
+                    warn!("Task {} has missing dependency: {}", task.id, dep);
                     return Err(anyhow!("Dependency {} not found", dep));
                 }
             }
@@ -310,6 +366,7 @@ impl AgentCoordinator {
         
         // Alert if queue is getting large
         if queue.len() > self.config.max_queue_size * 8 / 10 {
+            warn!("Task queue reaching capacity: {} tasks (80% of max {})", queue.len(), self.config.max_queue_size);
             let _ = self.event_tx.send(CoordinationEvent::QueueAlert {
                 size: queue.len(),
                 threshold: self.config.max_queue_size,
@@ -322,6 +379,10 @@ impl AgentCoordinator {
     /// Process the task queue
     pub async fn process_queue(&self) -> Result<()> {
         let mut queue = self.task_queue.write().await;
+        let queue_size = queue.len();
+        if queue_size > 0 {
+            debug!("Processing task queue with {} tasks", queue_size);
+        }
         let mut processed = Vec::new();
         
         // Try to assign each task
@@ -351,7 +412,7 @@ impl AgentCoordinator {
         let agents = self.agents.read().await;
         
         // Filter eligible agents
-        let mut eligible: Vec<(&String, &Agent)> = agents.iter()
+        let eligible: Vec<(&String, &Agent)> = agents.iter()
             .filter(|(_, agent)| {
                 agent.state == AgentState::Idle || agent.state == AgentState::Working
             })
@@ -463,13 +524,17 @@ impl AgentCoordinator {
             agent.state = AgentState::Working;
         }
         
-        // Record active task
+        // Record active task  
+        let task_clone = task.clone();
         active_tasks.insert(task.id.clone(), ActiveTask {
             task,
-            agent_id,
+            agent_id: agent_id.clone(),
             started_at: std::time::Instant::now(),
             status: TaskStatus::Assigned,
         });
+        
+        // Broadcast task assignment event
+        self.broadcast_task_assigned(&agent_id, &task_clone).await;
         
         Ok(())
     }
@@ -592,6 +657,7 @@ impl AgentCoordinator {
                     // Check if agent is idle too long
                     if agent.state == AgentState::Idle &&
                        agent.metrics.last_active.elapsed() > self.config.agent_idle_timeout {
+                        warn!("Agent {} idle for too long, marking as unavailable", id);
                         let _ = self.event_tx.send(CoordinationEvent::AgentStateChanged {
                             agent_id: id.clone(),
                             old_state: agent.state,
@@ -601,6 +667,7 @@ impl AgentCoordinator {
                     
                     // Check performance
                     if agent.metrics.success_rate < 0.5 {
+                        error!("Agent {} has low success rate: {:.2}%", id, agent.metrics.success_rate * 100.0);
                         let _ = self.event_tx.send(CoordinationEvent::PerformanceAlert {
                             agent_id: id.clone(),
                             metric: "success_rate".to_string(),
@@ -614,6 +681,22 @@ impl AgentCoordinator {
                 let _ = self.process_queue().await;
             }
         });
+    }
+    
+    /// Get statistics for all agents
+    pub async fn get_stats(&self) -> Vec<AgentStats> {
+        let agents = self.agents.read().await;
+        agents.values().map(|agent| AgentStats {
+            agent_id: agent.id.clone(),
+            name: agent.name.clone(),
+            specialization: agent.specialization.clone(),
+            state: agent.state,
+            workload: agent.workload,
+            active_tasks: agent.active_tasks.len(),
+            total_completed: agent.metrics.tasks_completed,
+            success_rate: agent.metrics.success_rate,
+            avg_completion_time_ms: agent.metrics.avg_completion_time_ms,
+        }).collect()
     }
 }
 

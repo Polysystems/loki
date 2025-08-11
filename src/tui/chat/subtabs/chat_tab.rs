@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use anyhow::Result;
 
 use super::SubtabController;
@@ -69,12 +69,37 @@ pub struct ChatTab {
     
     /// Show insights panel
     show_insights_panel: bool,
-    
-    /// Whether the chat area is currently focused (vs input area)
-    chat_focused: bool,
 }
 
 impl ChatTab {
+    /// Handle mouse events for scrolling
+    pub fn handle_mouse_event(&mut self, event: MouseEvent) -> Result<()> {
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                // Scroll up to see older messages
+                self.scroll_offset += 3;  // Scroll 3 messages at a time
+                self.smooth_scroll.scroll_to(self.scroll_offset);
+                self.toast_manager.add_toast(
+                    "Scrolling up".to_string(),
+                    ToastType::Info
+                );
+            }
+            MouseEventKind::ScrollDown => {
+                // Scroll down to see newer messages
+                self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                if self.scroll_offset == 0 {
+                    self.toast_manager.add_toast(
+                        "At latest messages".to_string(),
+                        ToastType::Info
+                    );
+                }
+                self.smooth_scroll.scroll_to(self.scroll_offset);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    
     /// Update orchestration state
     fn update_orchestration_state(&mut self) {
         // This is called during render to ensure state is current
@@ -145,7 +170,6 @@ impl ChatTab {
             active_tools: Vec::new(),
             cognitive_insights: Vec::new(),
             show_insights_panel: false,
-            chat_focused: false,
         }
     }
     
@@ -336,32 +360,38 @@ impl ChatTab {
             ))));
         }
         
-        // Calculate scrolling for the list
+        // Calculate scrolling for the list with proper pagination
         let total_items = list_items.len();
         let visible_height = area.height.saturating_sub(2) as usize;
         
-        // For now, let's just show ALL messages and let the List widget handle overflow
-        // This is simpler and should work better than trying to manually paginate
-        let visible_items = list_items;
-        
-        // We'll improve scrolling later if needed, but for now let's get messages displaying
+        // Implement proper pagination
+        let visible_items = if total_items > visible_height {
+            // Auto-scroll to bottom for new messages (when scroll_offset is 0)
+            let start_idx = if self.scroll_offset == 0 {
+                // Show the latest messages at the bottom
+                total_items.saturating_sub(visible_height)
+            } else {
+                // Manual scrolling - ensure we don't go out of bounds
+                let max_offset = total_items.saturating_sub(visible_height);
+                (max_offset).saturating_sub(self.scroll_offset.min(max_offset))
+            };
+            
+            let end_idx = (start_idx + visible_height).min(total_items);
+            list_items[start_idx..end_idx].to_vec()
+        } else {
+            // All items fit in the view
+            list_items
+        };
         
         // Add scroll indicators to title
-        let title = {
-            let focus_indicator = if self.chat_focused { " [FOCUSED]" } else { "" };
-            format!(" Chat History{} ({} messages) [Tab: toggle focus] ", focus_indicator, total_items)
-        };
+        let title = format!(" Chat History ({} messages) [Ctrl+↑↓: scroll, PgUp/PgDn: page] ", total_items);
         
         // Create the List widget with only the visible items
         let messages_list = List::new(visible_items)
             .block(Block::default()
                 .borders(Borders::ALL)
-                .border_type(if self.chat_focused { BorderType::Thick } else { BorderType::Rounded })
-                .border_style(if self.chat_focused {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                })
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::DarkGray))
                 .title(title)
                 .title_alignment(Alignment::Center));
         
@@ -434,12 +464,15 @@ impl ChatTab {
                         if self.selected_model.is_none() || 
                            (self.selected_model.as_ref().map_or(true, |s| !manager.enabled_models.contains(s))) {
                             // Prefer local/Ollama models over API models
-                            let selected = manager.enabled_models.iter()
+                            if let Some(selected) = manager.enabled_models.iter()
                                 .find(|m| !m.contains("gpt") && !m.contains("claude") && !m.contains("gemini"))
-                                .or_else(|| manager.enabled_models.first())
-                                .unwrap();
-                            self.selected_model = Some(selected.clone());
-                            tracing::debug!("Updated selected model to: {}", selected);
+                                .or_else(|| manager.enabled_models.first()) {
+                                self.selected_model = Some(selected.clone());
+                                tracing::debug!("Updated selected model to: {}", selected);
+                            } else {
+                                tracing::warn!("No models available to select");
+                                self.selected_model = None;
+                            }
                         }
                     }
                     
@@ -501,7 +534,7 @@ impl ChatTab {
     
     /// Render the input area
     fn render_input(&self, f: &mut Frame, area: Rect) {
-        let input_style = if self.input_mode && !self.chat_focused {
+        let input_style = if self.input_mode {
             Style::default().fg(Color::Yellow)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -526,7 +559,7 @@ impl ChatTab {
         };
         
         // Add scroll indicator to title when needed
-        let title = if self.input_mode && !self.chat_focused {
+        let title = if self.input_mode {
             if total_lines > visible_lines {
                 let scroll_info = if self.input_scroll_offset == 0 {
                     "(top)"
@@ -535,14 +568,12 @@ impl ChatTab {
                 } else {
                     "(scrolling)"
                 };
-                format!(" Message {} [FOCUSED] {} ", scroll_info, "▌")
+                format!(" Message {} (Enter to send) {} ", scroll_info, "▌")
             } else {
-                format!(" Message [FOCUSED] (Enter to send) {} ", "▌")
+                format!(" Message (Enter to send) {} ", "▌")
             }
-        } else if self.chat_focused {
-            " Message (Tab to focus input) ".to_string()
         } else {
-            " Message (Tab to focus) ".to_string()
+            " Message (Tab to enter input mode) ".to_string()
         };
         
         // Create the input widget with the visible text only
@@ -550,9 +581,9 @@ impl ChatTab {
             .style(input_style)
             .block(Block::default()
                 .borders(Borders::ALL)
-                .border_type(if self.input_mode && !self.chat_focused { BorderType::Thick } else { BorderType::Rounded })
+                .border_type(if self.input_mode { BorderType::Thick } else { BorderType::Rounded })
                 .title(title)
-                .border_style(if self.input_mode && !self.chat_focused {
+                .border_style(if self.input_mode {
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
@@ -934,21 +965,6 @@ impl SubtabController for ChatTab {
                 self.smooth_scroll.scroll_to(self.scroll_offset);
                 return Ok(());
             }
-            // Arrow keys for scrolling when chat is focused
-            KeyCode::Up if self.chat_focused && !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Scroll up one line when chat is focused
-                self.scroll_offset += 1;
-                self.smooth_scroll.scroll_to(self.scroll_offset);
-                return Ok(());
-            }
-            KeyCode::Down if self.chat_focused && !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Scroll down one line when chat is focused
-                if self.scroll_offset > 0 {
-                    self.scroll_offset -= 1;
-                    self.smooth_scroll.scroll_to(self.scroll_offset);
-                }
-                return Ok(());
-            }
             _ => {}
         }
         
@@ -1029,43 +1045,25 @@ impl SubtabController for ChatTab {
         // Handle mode switching and other keys
         match key.code {
             KeyCode::Tab => {
-                // Toggle between chat focus and input focus
+                // Toggle input mode
+                self.input_mode = !self.input_mode;
                 if self.input_mode {
-                    // Already in input mode, toggle focus between chat and input
-                    self.chat_focused = !self.chat_focused;
-                    if self.chat_focused {
-                        self.toast_manager.add_toast(
-                            "Focused on chat history (use arrows to scroll)".to_string(),
-                            ToastType::Info
-                        );
-                    } else {
-                        self.toast_manager.add_toast(
-                            "Focused on input area".to_string(),
-                            ToastType::Info
-                        );
-                        // Reset input scroll when focusing on input
-                        self.input_scroll_offset = 0;
-                    }
-                } else {
-                    // Not in input mode, enter it
-                    self.input_mode = true;
-                    self.chat_focused = false;
-                    // Don't auto-scroll - preserve user's current scroll position
-                    // Only reset input scroll
+                    self.toast_manager.add_toast(
+                        "Input mode active - type your message".to_string(),
+                        ToastType::Info
+                    );
+                    // Reset input scroll when entering input mode
                     self.input_scroll_offset = 0;
+                } else {
+                    self.toast_manager.add_toast(
+                        "Navigation mode - press Tab to type".to_string(),
+                        ToastType::Info
+                    );
                 }
             }
             KeyCode::Esc => {
-                // Exit input mode with Escape key or switch focus to chat
-                if self.input_mode && !self.chat_focused {
-                    // If input is focused, switch to chat focus
-                    self.chat_focused = true;
-                    self.toast_manager.add_toast(
-                        "Switched to chat history".to_string(),
-                        ToastType::Info
-                    );
-                } else if self.chat_focused {
-                    // If chat is focused, exit input mode entirely
+                // Exit input mode with Escape key
+                if self.input_mode {
                     self.input_mode = false;
                     self.toast_manager.add_toast(
                         "Exited input mode".to_string(),
@@ -1110,23 +1108,8 @@ impl SubtabController for ChatTab {
                     });
                 }
             }
-            // Handle arrow keys for scrolling when chat is focused
-            KeyCode::Up if self.chat_focused => {
-                // Scroll chat history up one line (older messages)
-                self.scroll_offset += 1;
-                self.smooth_scroll.scroll_to(self.scroll_offset);
-                return Ok(());
-            }
-            KeyCode::Down if self.chat_focused => {
-                // Scroll chat history down one line (newer messages)
-                if self.scroll_offset > 0 {
-                    self.scroll_offset -= 1;
-                    self.smooth_scroll.scroll_to(self.scroll_offset);
-                }
-                return Ok(());
-            }
             _ => {
-                if self.input_mode && !self.chat_focused {
+                if self.input_mode {
                     // When in input mode AND input is focused, handle all input through the processor
                     // Arrow keys in input mode navigate history, not scroll
                     tokio::task::block_in_place(|| {
@@ -1161,39 +1144,15 @@ impl SubtabController for ChatTab {
                         self.input_scroll_offset = cursor_line;
                     }
                 } else {
-                    // Navigation mode - handle scrolling
+                    // Navigation mode - handle vim-like keys
                     match key.code {
-                        KeyCode::Up => {
-                            // Scroll up to see older messages (increase offset)
-                            self.scroll_offset += 1;
-                            self.smooth_scroll.scroll_to(self.scroll_offset);
-                        }
-                        KeyCode::Down => {
-                            // Scroll down to see newer messages (decrease offset)
-                            if self.scroll_offset > 0 {
-                                self.scroll_offset -= 1;
-                                self.smooth_scroll.scroll_to(self.scroll_offset);
-                            }
-                        }
-                        // PageUp/PageDown are handled above for both modes
-                        KeyCode::Home => {
-                            // Jump to oldest messages
-                            let state = tokio::task::block_in_place(|| {
-                                tokio::runtime::Handle::current().block_on(async {
-                                    self.state.read().await.messages.len()
-                                })
-                            });
-                            self.scroll_offset = state * 2; // Large value to reach the top
-                            self.smooth_scroll.scroll_to(self.scroll_offset);
-                        }
-                        KeyCode::End => {
-                            // Jump to newest messages
-                            self.scroll_offset = 0;
-                            self.smooth_scroll.scroll_to(0);
-                        }
                         KeyCode::Char('i') | KeyCode::Char('a') => {
                             // Enter input mode with 'i' or 'a' (vim-like)
                             self.input_mode = true;
+                            self.toast_manager.add_toast(
+                                "Input mode active - type your message".to_string(),
+                                ToastType::Info
+                            );
                         }
                         _ => {}
                     }

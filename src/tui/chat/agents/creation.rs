@@ -12,6 +12,8 @@ use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
 use crate::cognitive::agents::AgentSpecialization;
+use super::registry::AgentRegistry;
+use super::coordination::{Agent as CoordinationAgent, AgentState, AgentMetrics};
 
 /// Agent creation wizard for step-by-step agent configuration
 pub struct AgentCreationWizard {
@@ -32,6 +34,12 @@ pub struct AgentCreationWizard {
     
     /// Validation rules
     validation_rules: ValidationRules,
+    
+    /// Agent registry for persistence
+    registry: Option<Arc<RwLock<AgentRegistry>>>,
+    
+    /// Available models dynamically discovered
+    available_models: Arc<RwLock<Vec<String>>>,
 }
 
 /// Steps in the creation wizard
@@ -547,6 +555,48 @@ impl Default for ValidationRules {
     }
 }
 
+impl ValidationRules {
+    /// Validate an agent draft
+    pub fn validate(&self, draft: &AgentDraft) -> ValidationResult {
+        let mut errors = Vec::new();
+        
+        // Validate name length
+        if draft.name.len() < self.min_name_length {
+            errors.push(format!("Name must be at least {} characters", self.min_name_length));
+        }
+        if draft.name.len() > self.max_name_length {
+            errors.push(format!("Name must be at most {} characters", self.max_name_length));
+        }
+        
+        // Validate skills
+        if draft.skills.len() < self.required_skills {
+            errors.push(format!("At least {} skill(s) required", self.required_skills));
+        }
+        
+        // Validate tools
+        if draft.allowed_tools.len() > self.max_tools {
+            errors.push(format!("Maximum {} tools allowed", self.max_tools));
+        }
+        
+        // Validate models
+        if draft.preferred_models.len() > self.max_models {
+            errors.push(format!("Maximum {} models allowed", self.max_models));
+        }
+        
+        ValidationResult {
+            valid: errors.is_empty(),
+            errors,
+        }
+    }
+}
+
+/// Validation result
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ValidationResult {
+    pub valid: bool,
+    pub errors: Vec<String>,
+}
+
 impl AgentCreationWizard {
     /// Create a new wizard
     pub fn new() -> Self {
@@ -557,7 +607,21 @@ impl AgentCreationWizard {
             personality_builder: PersonalityBuilder::new(),
             skill_repository: SkillRepository::new(),
             validation_rules: ValidationRules::default(),
+            registry: None,
+            available_models: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+    
+    /// Create a wizard with a registry
+    pub fn with_registry(registry: Arc<RwLock<AgentRegistry>>) -> Self {
+        let mut wizard = Self::new();
+        wizard.registry = Some(registry);
+        wizard
+    }
+    
+    /// Set the agent registry
+    pub fn set_registry(&mut self, registry: Arc<RwLock<AgentRegistry>>) {
+        self.registry = Some(registry);
     }
     
     /// Load agent templates
@@ -847,9 +911,40 @@ impl AgentCreationWizard {
     
     /// Add available model to the wizard
     pub async fn add_available_model(&self, model_id: String) -> Result<()> {
-        // This method adds a model to the list of available models
-        // Implementation would depend on how models are managed
-        // For now, just return Ok to satisfy the interface
+        // Add to local available models list
+        let mut models = self.available_models.write().await;
+        if !models.contains(&model_id) {
+            models.push(model_id.clone());
+            tracing::debug!("Added available model to wizard: {}", model_id);
+        }
+        
+        // Also add to registry if available
+        if let Some(registry) = &self.registry {
+            registry.read().await.add_available_model(model_id).await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Get available models
+    pub async fn get_available_models(&self) -> Vec<String> {
+        if let Some(registry) = &self.registry {
+            // Prefer registry's model list if available
+            registry.read().await.get_available_models().await
+        } else {
+            // Use local list
+            self.available_models.read().await.clone()
+        }
+    }
+    
+    /// Set all available models at once
+    pub async fn set_available_models(&self, models: Vec<String>) -> Result<()> {
+        *self.available_models.write().await = models.clone();
+        
+        if let Some(registry) = &self.registry {
+            registry.write().await.set_available_models(models).await?;
+        }
+        
         Ok(())
     }
 
@@ -898,6 +993,165 @@ impl AgentCreationWizard {
             },
             metadata: draft.metadata,
         })
+    }
+    
+    /// Process a request to create or configure an agent
+    pub async fn process_request(&self, data: serde_json::Value) -> Result<serde_json::Value> {
+        // Parse the request type
+        let request_type = data.get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("create");
+        
+        match request_type {
+            "create" => {
+                // Create a new agent from the provided configuration
+                if let Ok(config) = serde_json::from_value::<AgentConfig>(data.get("config").cloned().unwrap_or_default()) {
+                    let agent_id = config.id.clone();
+                    tracing::info!("Creating agent {} via process_request", agent_id);
+                    
+                    // Return the created agent configuration
+                    Ok(serde_json::to_value(config)?)
+                } else {
+                    Err(anyhow::anyhow!("Invalid agent configuration"))
+                }
+            },
+            "list_templates" => {
+                // Return available templates
+                let templates = Self::load_templates();
+                Ok(serde_json::to_value(templates)?)
+            },
+            "validate" => {
+                // Validate an agent configuration
+                if let Ok(draft) = serde_json::from_value::<AgentDraft>(data.get("draft").cloned().unwrap_or_default()) {
+                    let validation_result = self.validation_rules.validate(&draft);
+                    Ok(serde_json::to_value(validation_result)?)
+                } else {
+                    Err(anyhow::anyhow!("Invalid agent draft"))
+                }
+            },
+            _ => {
+                Err(anyhow::anyhow!("Unknown request type: {}", request_type))
+            }
+        }
+    }
+    
+    /// Register a new agent with the wizard
+    pub async fn register_agent(&self, agent_id: String, config: AgentConfig) -> Result<()> {
+        tracing::info!("Registering agent {} with wizard", agent_id);
+        
+        // Store in registry if available
+        if let Some(registry) = &self.registry {
+            // Ensure the config has the correct ID
+            let mut config = config.clone();
+            config.id = agent_id.clone();
+            
+            // Register with the registry
+            let mut registry_write = registry.write().await;
+            let registered_id = registry_write.register(config.clone()).await?;
+            
+            tracing::info!("Agent {} registered in registry with ID: {}", agent_id, registered_id);
+            
+            // Update usage stats to mark initial creation
+            registry_write.update_usage_stats(&registered_id, |stats| {
+                stats.last_activated = Some(Utc::now());
+            }).await?;
+            
+            tracing::debug!("Agent {} registered with specialization {:?}", 
+                agent_id, config.specialization);
+        } else {
+            tracing::warn!("No registry available, agent {} configuration not persisted", agent_id);
+            tracing::debug!("Agent {} registered with specialization {:?}", 
+                agent_id, config.specialization);
+        }
+        
+        Ok(())
+    }
+    
+    /// Create an agent from configuration
+    pub async fn create_agent(&self, agent_id: String) -> Result<Arc<RwLock<CoordinationAgent>>> {
+        tracing::info!("Creating agent instance: {}", agent_id);
+        
+        // Retrieve configuration from registry
+        let agent_entry = if let Some(registry) = &self.registry {
+            registry.read().await.get(&agent_id).await?
+                .ok_or_else(|| anyhow::anyhow!("Agent {} not found in registry", agent_id))?
+        } else {
+            return Err(anyhow::anyhow!("No registry available to retrieve agent configuration"));
+        };
+        
+        let config = agent_entry.config;
+        
+        // Create the coordination agent with proper fields
+        let coord_agent = CoordinationAgent {
+            id: config.id.clone(),
+            name: config.name.clone(),
+            specialization: config.specialization.clone(),
+            state: AgentState::Idle,
+            metrics: AgentMetrics {
+                tasks_completed: agent_entry.metadata.usage_stats.successful_tasks,
+                tasks_failed: agent_entry.metadata.usage_stats.failed_tasks,
+                avg_completion_time_ms: agent_entry.metadata.usage_stats.avg_response_time_ms,
+                success_rate: if agent_entry.metadata.usage_stats.successful_tasks > 0 {
+                    agent_entry.metadata.usage_stats.successful_tasks as f32 / 
+                    (agent_entry.metadata.usage_stats.successful_tasks + agent_entry.metadata.usage_stats.failed_tasks) as f32
+                } else {
+                    1.0
+                },
+                quality_score: 1.0,
+                last_active: std::time::Instant::now(),
+            },
+            workload: 0.0,
+            max_concurrent_tasks: config.performance_settings.batch_size.max(1),
+            active_tasks: Vec::new(),
+        };
+        
+        let agent = Arc::new(RwLock::new(coord_agent));
+        
+        // Update registry to mark agent as active
+        if let Some(registry) = &self.registry {
+            registry.read().await.update_runtime_state(&agent_id, super::registry::RuntimeState {
+                is_active: true,
+                status: super::registry::AgentStatus::Ready,
+                resources: super::registry::ResourceAllocation {
+                    memory_mb: config.performance_settings.batch_size as u32 * 50,
+                    cpu_percent: 10,
+                    token_budget: config.model_preferences.context_preferences.preferred_context_size as u32,
+                    rate_limit: 60,
+                },
+                session_id: Some(Uuid::new_v4().to_string()),
+            }).await?;
+            
+            // Update activation stats
+            registry.read().await.update_usage_stats(&agent_id, |stats| {
+                stats.activation_count += 1;
+                stats.last_activated = Some(Utc::now());
+            }).await?;
+        }
+        
+        tracing::info!("Agent {} created and activated successfully", agent_id);
+        Ok(agent)
+    }
+    
+    /// Retrieve an agent configuration from the registry
+    pub async fn get_agent_config(&self, agent_id: &str) -> Result<Option<AgentConfig>> {
+        if let Some(registry) = &self.registry {
+            if let Some(entry) = registry.read().await.get(agent_id).await? {
+                return Ok(Some(entry.config));
+            }
+        }
+        Ok(None)
+    }
+    
+    /// List all registered agents
+    pub async fn list_agents(&self) -> Result<Vec<(String, AgentConfig)>> {
+        if let Some(registry) = &self.registry {
+            let agents = registry.read().await.list().await?;
+            Ok(agents.into_iter()
+                .map(|(id, entry)| (id, entry.config))
+                .collect())
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 

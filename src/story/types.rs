@@ -371,6 +371,23 @@ pub enum PlotType {
         parameters: Vec<String>,
         outcome: String,
     },
+    /// Reasoning process
+    Reasoning {
+        premise: String,
+        conclusion: String,
+        confidence: f32,
+    },
+    /// Event occurrence
+    Event {
+        event_type: String,
+        description: String,
+        impact: f32,
+    },
+    /// Context information
+    Context {
+        context_type: String,
+        data: String,
+    },
 }
 
 /// Metadata associated with a story
@@ -580,6 +597,17 @@ pub enum SegmentType {
     Transition,
 }
 
+/// Story context for sharing story state across components
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoryContext {
+    pub story_id: StoryId,
+    pub narrative: String,
+    pub recent_plot_points: Vec<PlotPoint>,
+    pub active_arc: Option<StoryArc>,
+    pub current_plot: String,
+    pub current_arc: Option<StoryArcId>,
+}
+
 /// Task mapping for story-driven tasks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskMapping {
@@ -593,6 +621,9 @@ pub struct TaskMapping {
 /// Narrative context for chat integration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NarrativeContext {
+    pub story_id: StoryId,
+    pub current_plot: String,
+    pub current_arc: Option<StoryArc>,
     pub current_chapter: String,
     pub active_plot_points: Vec<String>,
     pub story_themes: Vec<String>,
@@ -604,4 +635,38 @@ pub struct NarrativeContext {
     pub active_characters: Vec<String>,
     pub plot_threads: Vec<String>,
     pub tone: String,
+}
+
+impl From<NarrativeContext> for StoryContext {
+    fn from(narrative: NarrativeContext) -> Self {
+        StoryContext {
+            story_id: narrative.story_id,
+            narrative: narrative.current_plot.clone(),
+            recent_plot_points: Vec::new(), // NarrativeContext doesn't have PlotPoints
+            active_arc: narrative.current_arc.clone(),
+            current_plot: narrative.current_plot,
+            current_arc: narrative.current_arc.as_ref().map(|arc| arc.id),
+        }
+    }
+}
+
+impl From<StoryContext> for NarrativeContext {
+    fn from(story: StoryContext) -> Self {
+        NarrativeContext {
+            story_id: story.story_id,
+            current_plot: story.current_plot,
+            current_arc: story.active_arc,
+            current_chapter: String::new(),
+            active_plot_points: story.recent_plot_points.iter()
+                .map(|pp| pp.description.clone())
+                .collect(),
+            story_themes: Vec::new(),
+            character_state: HashMap::new(),
+            recent_events: Vec::new(),
+            narrative_tension: 0.5,
+            active_characters: Vec::new(),
+            plot_threads: Vec::new(),
+            tone: "neutral".to_string(),
+        }
+    }
 }

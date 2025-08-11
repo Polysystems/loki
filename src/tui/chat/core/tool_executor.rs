@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot, RwLock, Mutex};
 use tracing::{info, warn};
 
 use crate::tools::intelligent_manager::{IntelligentToolManager, ToolRequest, ResultType, MemoryIntegration};
-use crate::tools::mcp_client::{McpClient, McpToolCall};
+use crate::mcp::{McpClient, McpToolCall};
 use crate::tools::task_management::{TaskManager, TaskPriority,  TaskPlatform};
 use crate::models::ModelOrchestrator;
 use crate::tui::chat::core::commands::{ParsedCommand, CommandResult, ResultFormat};
@@ -160,6 +160,64 @@ impl ChatToolExecutor {
         executor.initialize_workflows();
         
         executor
+    }
+    
+    /// Get tool suggestions based on intent
+    pub async fn get_tool_suggestions(&self, intent: &str) -> Vec<String> {
+        let mut suggestions = Vec::new();
+        
+        // Use IntelligentToolManager to get suggestions if available
+        if let Some(tool_manager) = &self.tool_manager {
+            // Get available tools and filter based on intent keywords
+            if let Ok(available_tools) = tool_manager.get_available_tools().await {
+                let intent_lower = intent.to_lowercase();
+                
+                for tool in available_tools {
+                    let tool_lower = tool.to_lowercase();
+                    
+                    // Match tools based on intent keywords
+                    if (intent_lower.contains("search") && tool_lower.contains("search")) ||
+                       (intent_lower.contains("github") && tool_lower.contains("github")) ||
+                       (intent_lower.contains("code") && tool_lower.contains("code")) ||
+                       (intent_lower.contains("file") && tool_lower.contains("file")) ||
+                       (intent_lower.contains("api") && tool_lower.contains("api")) ||
+                       (intent_lower.contains("slack") && tool_lower.contains("slack")) ||
+                       (intent_lower.contains("email") && tool_lower.contains("email")) ||
+                       (intent_lower.contains("shell") && tool_lower.contains("shell")) ||
+                       (intent_lower.contains("browser") && tool_lower.contains("browser")) ||
+                       (intent_lower.contains("database") && tool_lower.contains("database")) {
+                        suggestions.push(format!("/execute tool={} args={{...}}", tool));
+                    }
+                }
+            }
+        }
+        
+        // Add MCP tool suggestions if available
+        if let Some(mcp_client) = &self.mcp_client {
+            if let Ok(servers) = mcp_client.list_servers().await {
+                for server_name in servers {
+                    if intent.to_lowercase().contains(&server_name.to_lowercase()) {
+                        suggestions.push(format!("/execute tool=mcp_{} args={{...}}", server_name));
+                    }
+                }
+            }
+        }
+        
+        // Add workflow suggestions based on intent
+        if intent.to_lowercase().contains("review") {
+            suggestions.push("/workflow code_review params={\"file\": \"...\"}".to_string());
+        }
+        if intent.to_lowercase().contains("performance") {
+            suggestions.push("/workflow performance_analysis params={\"duration\": \"60s\"}".to_string());
+        }
+        if intent.to_lowercase().contains("security") {
+            suggestions.push("/workflow security_audit params={\"target\": \"...\"}".to_string());
+        }
+        if intent.to_lowercase().contains("test") {
+            suggestions.push("/workflow test_generation params={\"file\": \"...\"}".to_string());
+        }
+        
+        suggestions
     }
     
     /// Initialize built-in workflows
@@ -627,22 +685,38 @@ impl ChatToolExecutor {
                 }
                 
                 // Add intelligent tool manager tools
-                if let Some(_tool_manager) = &self.tool_manager {
-                    // In a real implementation, tool_manager would have a list_tools method
-                    tools.extend(vec![
-                        json!({
-                            "name": "web_search",
-                            "description": "Search the web for information",
-                            "source": "native",
-                            "available": true
-                        }),
-                        json!({
-                            "name": "code_analyzer",
-                            "description": "Analyze code for quality and issues",
-                            "source": "native",
-                            "available": true
-                        }),
-                    ]);
+                if let Some(tool_manager) = &self.tool_manager {
+                    // Get available tools from the intelligent tool manager
+                    match tool_manager.get_available_tools().await {
+                        Ok(available_tools) => {
+                            for tool_name in available_tools {
+                                // Get description based on tool name (basic mapping)
+                                let description = match tool_name.as_str() {
+                                    "github" => "GitHub repository operations",
+                                    "web_search" => "Search the web for information",
+                                    "code_analysis" => "Analyze code structure and quality",
+                                    "slack" => "Slack messaging and integration",
+                                    "email" => "Email operations",
+                                    "file" => "File system operations",
+                                    "shell" => "Execute shell commands",
+                                    "api" => "Make API requests",
+                                    "browser" => "Browser automation",
+                                    "database" => "Database operations",
+                                    _ => "Tool for various operations",
+                                };
+                                
+                                tools.push(json!({
+                                    "name": tool_name,
+                                    "description": description,
+                                    "source": "intelligent_manager",
+                                    "available": true
+                                }));
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to get tools from IntelligentToolManager: {}", e);
+                        }
+                    }
                 }
                 
                 Ok(CommandResult {

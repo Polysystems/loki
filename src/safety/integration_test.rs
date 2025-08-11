@@ -10,7 +10,7 @@ use tokio::time::{Duration, timeout};
 
 use crate::cognitive::{CognitiveConfig, CognitiveSystem};
 use crate::compute::ComputeManager;
-use crate::safety::{ActionType, AuditConfig, ResourceLimits, ValidatorConfig};
+use crate::safety::{AuditConfig, ResourceLimits, ValidatorConfig};
 use crate::streaming::StreamManager;
 
 /// Test suite for safety integration

@@ -487,6 +487,7 @@ impl CodeAgent {
                     prefer_local: false,
                     require_streaming: false,
                     required_capabilities: vec!["code_generation".to_string()],
+                    task_hint: Some("code_generation".to_string()),
                     creativity_level: Some(0.7),
                     formality_level: Some(0.8),
                     target_audience: Some("developers".to_string()),
@@ -679,7 +680,7 @@ class {}:
     def execute(self):
         """Main functionality."""
         # Implementation goes here
-        raise NotImplementedError("Implement {}")
+        raise NotImplementedError(f"Implement {name}")
 
 if __name__ == "__main__":
     instance = {}()
@@ -687,8 +688,7 @@ if __name__ == "__main__":
 "#, name, description,
     name.replace(" ", ""),
     name.replace(" ", ""),
-    name,
-    name.replace(" ", ""))
+    name)
     }
     
     /// Generate JavaScript template
@@ -987,7 +987,7 @@ impl CodeAgentFactory {
         let specialization = Self::determine_specialization(requirements);
         let name = Self::generate_agent_name(&specialization);
         
-        let mut agent = CodeAgent::new(name, specialization, update_tx);
+        let agent = CodeAgent::new(name, specialization, update_tx);
         // Model orchestrator should be set after creation if available
         agent
     }

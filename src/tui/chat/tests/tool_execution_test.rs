@@ -10,7 +10,7 @@ mod tool_execution_tests {
     use crate::tui::chat::core::commands::{ParsedCommand, CommandResult, ResultFormat};
     use crate::tools::IntelligentToolManager;
     use crate::tools::task_management::{TaskManager, TaskConfig};
-    use crate::tools::mcp_client::{McpClient, McpClientConfig};
+    use crate::mcp::{McpClient, McpClientConfig};
     use crate::models::ModelOrchestrator;
     use crate::memory::CognitiveMemory;
     use std::sync::Arc;

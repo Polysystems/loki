@@ -1,6 +1,8 @@
 //! CLI/Terminal subtab with integrated command execution
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -16,6 +18,10 @@ use super::SubtabController;
 use crate::tui::chat::ui_enhancements::{Theme, AnimationState};
 use crate::tui::chat::core::tool_executor::ChatToolExecutor;
 use crate::tui::chat::core::commands::{CommandRegistry, ParsedCommand, ResultFormat};
+use crate::tasks::{Task, TaskRegistry, TaskContext, TaskResult};
+use crate::cli::TaskArgs;
+use crate::config::Config;
+use crate::models::ModelManager;
 
 /// Maximum number of history entries to keep
 const MAX_HISTORY: usize = 1000;
@@ -92,6 +98,12 @@ pub struct CliTab {
     
     /// Command registry for parsing
     command_registry: CommandRegistry,
+    
+    /// Task registry for AI-powered tasks
+    task_registry: Option<Arc<TaskRegistry>>,
+    
+    /// Task context with config and model manager
+    task_context: Option<TaskContext>,
 }
 
 impl CliTab {
@@ -116,6 +128,8 @@ impl CliTab {
             execution_animation: None,
             tool_executor: None,
             command_registry: CommandRegistry::new(),
+            task_registry: None,
+            task_context: None,
         };
         
         // Add welcome message
@@ -131,6 +145,17 @@ impl CliTab {
     pub fn set_tool_executor(&mut self, executor: Arc<ChatToolExecutor>) {
         self.tool_executor = Some(executor);
         self.add_output("✅ Tool executor connected - advanced commands available", LineType::System);
+    }
+    
+    /// Set the task registry for AI-powered tasks
+    pub fn set_task_registry(&mut self, registry: Arc<TaskRegistry>) {
+        self.task_registry = Some(registry);
+        self.add_output("🤖 Task registry connected - AI tasks available", LineType::System);
+    }
+    
+    /// Set the task context
+    pub fn set_task_context(&mut self, context: TaskContext) {
+        self.task_context = Some(context);
     }
     
     /// Get default command aliases
@@ -248,6 +273,9 @@ impl CliTab {
             }
             "alias" => {
                 self.handle_alias_command(&parts);
+            }
+            "task" => {
+                self.handle_task_command(&parts);
             }
             "echo" => {
                 let message = parts[1..].join(" ");
@@ -395,6 +423,22 @@ impl CliTab {
         self.add_output("  env          - Show environment variables", LineType::System);
         self.add_output("  help         - Show this help", LineType::System);
         self.add_output("", LineType::System);
+        
+        // Show task commands if registry is available
+        if self.task_registry.is_some() {
+            self.add_output("🤖 AI Task Commands:", LineType::System);
+            self.add_output("  task list           - List available AI tasks", LineType::System);
+            self.add_output("  task help <name>    - Get help for a specific task", LineType::System);
+            self.add_output("  task <name> [args]  - Execute an AI task", LineType::System);
+            self.add_output("", LineType::System);
+            self.add_output("Examples:", LineType::System);
+            self.add_output("  task review src/main.rs        - Review code", LineType::System);
+            self.add_output("  task complete src/lib.rs       - Generate code completion", LineType::System);
+            self.add_output("  task document src/module.rs    - Generate documentation", LineType::System);
+            self.add_output("", LineType::System);
+        }
+        
+        self.add_output("", LineType::System);
         self.add_output("⌨️ Keyboard Shortcuts:", LineType::System);
         self.add_output("  Ctrl+L       - Clear screen", LineType::System);
         self.add_output("  Ctrl+U       - Clear line", LineType::System);
@@ -428,6 +472,130 @@ impl CliTab {
         }
         
         self.add_output("", LineType::System);
+    }
+    
+    /// Handle task command
+    fn handle_task_command(&mut self, parts: &[&str]) {
+        if parts.len() == 1 || parts[1] == "list" {
+            // List available tasks
+            let task_info = if let Some(registry) = &self.task_registry {
+                let task_list = registry.list();
+                let mut output = vec![];
+                output.push(("".to_string(), LineType::System));
+                output.push(("🤖 Available AI Tasks:".to_string(), LineType::System));
+                
+                for (name, description) in task_list {
+                    output.push((format!("  {} - {}", name, description), LineType::Output));
+                }
+                
+                output.push(("".to_string(), LineType::System));
+                output.push(("Usage: task <name> [args...]".to_string(), LineType::System));
+                output.push(("Example: task review src/main.rs".to_string(), LineType::System));
+                Some(output)
+            } else {
+                None
+            };
+            
+            if let Some(output) = task_info {
+                for (text, line_type) in output {
+                    self.add_output(&text, line_type);
+                }
+            } else {
+                self.add_output("Task registry not initialized", LineType::Error);
+            }
+        } else if parts[1] == "help" && parts.len() >= 3 {
+            // Show help for specific task
+            let task_name = parts[2];
+            if let Some(ref registry) = self.task_registry {
+                if let Some(task) = registry.get(task_name) {
+                    self.add_output("", LineType::System);
+                    self.add_output(&format!("📖 Task: {}", task.name()), LineType::System);
+                    self.add_output(&format!("Description: {}", task.description()), LineType::Output);
+                    self.add_output("", LineType::System);
+                } else {
+                    self.add_output(&format!("Unknown task: {}", task_name), LineType::Error);
+                }
+            } else {
+                self.add_output("Task registry not initialized", LineType::Error);
+            }
+        } else {
+            // Execute task
+            let task_name = parts[1];
+            let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+            
+            self.execute_task(task_name, args);
+        }
+    }
+    
+    /// Execute a task
+    fn execute_task(&mut self, task_name: &str, args: Vec<String>) {
+        if let Some(ref registry) = self.task_registry {
+            if let Some(task) = registry.get(task_name) {
+                // Build TaskArgs
+                let task_args = TaskArgs {
+                    task: task_name.to_string(),
+                    args: args.clone(),
+                    input: args.first().and_then(|s| PathBuf::from_str(s).ok()),
+                    output: None,
+                };
+                
+                // Check if we have context
+                if let Some(ref context) = self.task_context {
+                    // Clone what we need before mutable borrow
+                    let config = context.config.clone();
+                    let model_manager = context.model_manager.clone();
+                    
+                    self.add_output(&format!("🚀 Executing task: {}", task_name), LineType::System);
+                    
+                    // Clone what we need for async execution
+                    let task_clone = task.clone();
+                    let task_args_clone = task_args.clone();
+                    
+                    // Create output sender for async results
+                    let output_sender = self.create_output_sender();
+                    
+                    // Execute task asynchronously
+                    tokio::spawn(async move {
+                        // Recreate context in async block
+                        let context = TaskContext {
+                            config,
+                            model_manager,
+                        };
+                        
+                        match task_clone.execute(task_args_clone, context).await {
+                            Ok(result) => {
+                                let message = if result.success {
+                                    format!("✅ {}", result.message)
+                                } else {
+                                    format!("❌ {}", result.message)
+                                };
+                                let _ = output_sender.send((message, LineType::Output));
+                                
+                                // Send result data if present
+                                if let Some(data) = result.data {
+                                    if let Ok(json_str) = serde_json::to_string_pretty(&data) {
+                                        for line in json_str.lines() {
+                                            let _ = output_sender.send((line.to_string(), LineType::Output));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = output_sender.send((format!("Task error: {}", e), LineType::Error));
+                            }
+                        }
+                    });
+                } else {
+                    self.add_output("Task context not initialized. Please set up config and model manager.", LineType::Error);
+                }
+            } else {
+                self.add_output(&format!("Unknown task: {}", task_name), LineType::Error);
+                self.add_output("Use 'task list' to see available tasks", LineType::System);
+            }
+        } else {
+            self.add_output("Task registry not initialized", LineType::Error);
+            self.add_output("Tasks are not available in this session", LineType::System);
+        }
     }
     
     /// Handle alias command

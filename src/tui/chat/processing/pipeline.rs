@@ -403,7 +403,7 @@ fn extract_entities(message: &str) -> Vec<String> {
     let mut entities = Vec::new();
     
     // Extract quoted strings
-    let quote_regex = regex::Regex::new(r#""([^"]+)"|'([^']+)'"#).unwrap();
+    let quote_regex = regex::Regex::new(r#""([^"]+)"|'([^']+)'"#).expect("Valid regex pattern");
     for cap in quote_regex.captures_iter(message) {
         if let Some(entity) = cap.get(1).or(cap.get(2)) {
             entities.push(entity.as_str().to_string());
@@ -411,7 +411,7 @@ fn extract_entities(message: &str) -> Vec<String> {
     }
     
     // Extract file paths
-    let path_regex = regex::Regex::new(r"(/[\w/.-]+|[\w]+\.[\w]+)").unwrap();
+    let path_regex = regex::Regex::new(r"(/[\w/.-]+|[\w]+\.[\w]+)").expect("Valid regex pattern");
     for cap in path_regex.captures_iter(message) {
         if let Some(path) = cap.get(0) {
             let path_str = path.as_str();
@@ -422,7 +422,7 @@ fn extract_entities(message: &str) -> Vec<String> {
     }
     
     // Extract URLs
-    let url_regex = regex::Regex::new(r"https?://[^\s]+").unwrap();
+    let url_regex = regex::Regex::new(r"https?://[^\s]+").expect("Valid regex pattern");
     for cap in url_regex.captures_iter(message) {
         if let Some(url) = cap.get(0) {
             entities.push(url.as_str().to_string());

@@ -14,6 +14,7 @@ use chrono::Utc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, info, warn};
 
 use crate::cognitive::character::LokiCharacter;
@@ -104,14 +105,20 @@ pub struct IntelligentToolManager {
     /// Active tool sessions
     active_sessions: Arc<RwLock<HashMap<String, ToolSession>>>,
 
+    /// Available tools registry
+    available_tools: Arc<RwLock<HashMap<String, ToolMetadata>>>,
+
     /// Pattern analyzer for tool usage patterns
     pattern_analyzer: Arc<ToolPatternAnalyzer>,
 
-    /// Emergent tool usage engine for advanced pattern discovery
-    emergent_engine: Option<Arc<EmergentToolUsageEngine>>,
+    /// Emergent tool usage engine for advanced pattern discovery (wrapped in RwLock for safe mutation)
+    emergent_engine: Arc<parking_lot::RwLock<Option<Arc<EmergentToolUsageEngine>>>>,
 
-    /// Story engine for tracking tool usage narratives
-    story_engine: Option<Arc<crate::story::StoryEngine>>,
+    /// Story engine for tracking tool usage narratives (wrapped in TokioRwLock for async Send safety)
+    story_engine: Arc<TokioRwLock<Option<Arc<crate::story::StoryEngine>>>>,
+    
+    /// Tool discovery engine for dynamic tool detection (wrapped in TokioRwLock for async Send safety)
+    tool_discovery: Arc<TokioRwLock<Option<Arc<crate::tui::chat::tools::discovery::ToolDiscoveryEngine>>>>,
 }
 
 impl Debug for IntelligentToolManager {
@@ -260,7 +267,7 @@ impl Default for ToolSelection {
 }
 
 /// Tool execution status
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ToolStatus {
     /// Successful execution
     Success,
@@ -271,7 +278,7 @@ pub enum ToolStatus {
 }
 
 /// Result of tool execution
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     /// Execution status
     pub status: ToolStatus,
@@ -410,6 +417,31 @@ pub enum SessionStatus {
 
     /// Failed with error
     Failed(String),
+}
+
+/// Tool metadata for the intelligent manager
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolMetadata {
+    /// Tool name
+    pub name: String,
+    /// Tool description
+    pub description: String,
+    /// Tool category
+    pub category: String,
+    /// Tool version
+    pub version: String,
+    /// Tool author
+    pub author: String,
+    /// Tool tags
+    pub tags: Vec<String>,
+    /// Tool capabilities
+    pub capabilities: Vec<String>,
+    /// Usage examples
+    pub examples: Vec<String>,
+    /// Creation timestamp
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Last update timestamp
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Tool integration events
@@ -713,11 +745,43 @@ pub struct ToolActivityResult {
 }
 
 impl IntelligentToolManager {
-    /// Create a placeholder instance for initialization
+    /// Create a new IntelligentToolManager with proper initialization
+    pub fn new() -> Self {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use crate::memory::CognitiveMemory;
+        use crate::cognitive::character::LokiCharacter;
+        use crate::safety::validator::ActionValidator;
+        
+        // Create minimal instances for initialization
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let memory = rt.block_on(CognitiveMemory::new_minimal()).unwrap();
+        let character = Arc::new(rt.block_on(LokiCharacter::new(memory.clone())).unwrap());
+        let safety_validator = Arc::new(rt.block_on(ActionValidator::new(
+            crate::safety::validator::ValidatorConfig::default()
+        )).unwrap());
+        
+        Self {
+            config: ToolManagerConfig::default(),
+            character,
+            memory,
+            safety_validator,
+            usage_patterns: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            archetypal_patterns: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            active_sessions: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            available_tools: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            pattern_analyzer: Arc::new(ToolPatternAnalyzer::new(PatternAnalyzerConfig::default())),
+            emergent_engine: Arc::new(parking_lot::RwLock::new(None)),
+            story_engine: Arc::new(TokioRwLock::new(None)),
+            tool_discovery: Arc::new(TokioRwLock::new(None)),
+        }
+    }
+    
+    /// Create a placeholder instance for initialization (deprecated - use new() instead)
+    #[deprecated(note = "Use new() instead")]
     pub fn placeholder() -> Self {
         use std::collections::HashMap;
         use std::sync::Arc;
-        use tokio::sync::RwLock;
         use crate::memory::CognitiveMemory;
         use crate::cognitive::character::LokiCharacter;
         use crate::safety::validator::ActionValidator;
@@ -738,20 +802,141 @@ impl IntelligentToolManager {
             usage_patterns: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             archetypal_patterns: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             active_sessions: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            available_tools: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             pattern_analyzer: Arc::new(ToolPatternAnalyzer::new(PatternAnalyzerConfig::default())),
-            emergent_engine: None,
-            story_engine: None,
+            emergent_engine: Arc::new(parking_lot::RwLock::new(None)),
+            story_engine: Arc::new(TokioRwLock::new(None)),
+            tool_discovery: Arc::new(TokioRwLock::new(None)),
         }
     }
     
-    /// Set story engine reference
+    /// Set story engine reference (deprecated - use wire_story_engine)
     pub fn set_story_engine(&mut self, story_engine: Arc<crate::story::StoryEngine>) {
-        self.story_engine = Some(story_engine);
+        // Use blocking write for synchronous context
+        *self.story_engine.blocking_write() = Some(story_engine);
+    }
+    
+    /// Set tool discovery engine for dynamic tool detection (deprecated - use wire_tool_discovery)
+    pub fn set_tool_discovery(&mut self, discovery: Arc<crate::tui::chat::tools::discovery::ToolDiscoveryEngine>) {
+        // Use blocking write for synchronous context
+        *self.tool_discovery.blocking_write() = Some(discovery);
+    }
+    
+    /// Wire story engine using interior mutability (thread-safe)
+    pub async fn wire_story_engine(&self, story_engine: Arc<crate::story::StoryEngine>) {
+        *self.story_engine.write().await = Some(story_engine);
+        info!("Story engine wired to IntelligentToolManager");
+    }
+    
+    /// Wire tool discovery engine using interior mutability (thread-safe)
+    pub async fn wire_tool_discovery(&self, discovery: Arc<crate::tui::chat::tools::discovery::ToolDiscoveryEngine>) {
+        *self.tool_discovery.write().await = Some(discovery);
+        info!("Tool discovery engine wired to IntelligentToolManager");
+    }
+    
+    /// Wire emergent engine using interior mutability (thread-safe)
+    pub async fn wire_emergent_engine(&self, engine: Arc<EmergentToolUsageEngine>) {
+        *self.emergent_engine.write() = Some(engine);
+        info!("Emergent engine wired to IntelligentToolManager");
+    }
+    
+    /// Register a dynamic tool with metadata
+    pub async fn register_dynamic_tool(&self, metadata: serde_json::Value) -> Result<()> {
+        let name = metadata.get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Tool metadata missing 'name' field"))?
+            .to_string();
+        
+        let description = metadata.get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("No description")
+            .to_string();
+        
+        let category = metadata.get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("General")
+            .to_string();
+        
+        // Create tool metadata
+        let tool_metadata = ToolMetadata {
+            name: name.clone(),
+            description: description.clone(),
+            category: category.clone(),
+            version: metadata.get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1.0.0")
+                .to_string(),
+            author: metadata.get("author")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown")
+                .to_string(),
+            tags: metadata.get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect())
+                .unwrap_or_else(Vec::new),
+            capabilities: Vec::new(),
+            examples: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        
+        // Store in available tools
+        self.available_tools.write().insert(name.clone(), tool_metadata);
+        
+        // Create usage pattern for the new tool
+        let pattern = ToolUsagePattern {
+            pattern_id: format!("dynamic_{}", name),
+            success_rate: 0.5, // Start with neutral success rate
+            avg_quality: 0.5,
+            usage_count: 0,
+            trigger_contexts: vec![category.clone()],
+            effective_combinations: Vec::new(),
+            last_updated: chrono::Utc::now(),
+        };
+        
+        self.usage_patterns.write().insert(name.clone(), pattern);
+        
+        info!("Registered dynamic tool: {}", name);
+        Ok(())
+    }
+    
+    /// Discover and register new tools dynamically
+    pub async fn discover_and_register_tools(&self) -> Result<Vec<String>> {
+        if let Some(discovery) = self.tool_discovery.read().await.as_ref() {
+            // First trigger discovery
+            let _ = discovery.discover_all().await?;
+            // Then get all discovered tools
+            let discovered = discovery.get_all_tools().await;
+            let mut tool_names = Vec::new();
+            
+            // Register discovered tools in usage patterns
+            let mut patterns = self.usage_patterns.write();
+            for tool in discovered {
+                let pattern = ToolUsagePattern {
+                    pattern_id: format!("{}_{}", tool.id, tool.category.display_name()),
+                    success_rate: 0.8,
+                    avg_quality: 0.75,
+                    usage_count: 0,
+                    trigger_contexts: tool.capabilities.iter().map(|c| format!("{:?}", c)).collect(),
+                    effective_combinations: Vec::new(),
+                    last_updated: chrono::Utc::now(),
+                };
+                patterns.insert(tool.id.clone(), pattern);
+                tool_names.push(tool.name);
+            }
+            
+            info!("Discovered and registered {} tools", tool_names.len());
+            Ok(tool_names)
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     /// Track tool execution in story
     async fn track_tool_execution(&self, tool_name: &str, request: &ToolRequest, result: &ToolResult) -> Result<()> {
-        if let Some(story_engine) = &self.story_engine {
+        if let Some(story_engine) = self.story_engine.read().await.as_ref() {
             // Get or create tools story
             let story_id = story_engine.get_or_create_system_story("Tool Execution".to_string()).await?;
 
@@ -793,8 +978,8 @@ impl IntelligentToolManager {
         Ok(())
     }
 
-    /// Create a new intelligent tool manager
-    pub async fn new(
+    /// Create a new intelligent tool manager with custom components
+    pub async fn new_with_components(
         character: Arc<LokiCharacter>,
         memory: Arc<CognitiveMemory>,
         safety_validator: Arc<ActionValidator>,
@@ -810,9 +995,11 @@ impl IntelligentToolManager {
             usage_patterns: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             archetypal_patterns: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             active_sessions: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            available_tools: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             pattern_analyzer: Arc::new(ToolPatternAnalyzer::new(PatternAnalyzerConfig::default())),
-            emergent_engine: None,
-            story_engine: None,
+            emergent_engine: Arc::new(parking_lot::RwLock::new(None)),
+            story_engine: Arc::new(TokioRwLock::new(None)),
+            tool_discovery: Arc::new(TokioRwLock::new(None)),
         };
 
         // Initialize archetypal patterns
@@ -839,9 +1026,11 @@ impl IntelligentToolManager {
             usage_patterns: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             archetypal_patterns: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             active_sessions: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            available_tools: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             pattern_analyzer: Arc::new(ToolPatternAnalyzer::new(PatternAnalyzerConfig::default())),
-            emergent_engine: None,
-            story_engine: None,
+            emergent_engine: Arc::new(parking_lot::RwLock::new(None)),
+            story_engine: Arc::new(TokioRwLock::new(None)),
+            tool_discovery: Arc::new(TokioRwLock::new(None)),
         };
 
         info!("Minimal Intelligent Tool Manager initialized");
@@ -1119,7 +1308,7 @@ impl IntelligentToolManager {
     /// Production MCP filesystem read implementation
     async fn call_mcp_filesystem_read(&self, file_path: &str) -> Result<String> {
         // Create MCP client with standard configuration
-        let mcp_client = crate::tools::create_standard_mcp_client().await?;
+        let mcp_client = crate::mcp::create_standard_mcp_client().await?;
 
         // Call the MCP filesystem server
         match mcp_client.read_file(file_path).await {
@@ -1148,7 +1337,7 @@ impl IntelligentToolManager {
 
         let mcp_task = tokio::spawn(async move {
             // Create MCP client for filesystem operations
-            let mcp_client = match crate::tools::create_standard_mcp_client().await {
+            let mcp_client = match crate::mcp::create_standard_mcp_client().await {
                 Ok(client) => client,
                 Err(e) => {
                     let _ = result_tx.send(Err(anyhow::anyhow!("Failed to create MCP client: {}", e)));
@@ -1157,7 +1346,7 @@ impl IntelligentToolManager {
             };
 
             // Use MCP filesystem search
-            match mcp_client.call_tool("filesystem", crate::tools::McpToolCall {
+            match mcp_client.call_tool("filesystem", crate::mcp::McpToolCall {
                 name: "search_files".to_string(),
                 arguments: json!({
                     "path": search_path,
@@ -1391,7 +1580,7 @@ impl IntelligentToolManager {
 
         let mcp_task = tokio::spawn(async move {
             // Create MCP client for GitHub operations
-            let mcp_client = match crate::tools::create_mcp_client().await {
+            let mcp_client = match crate::mcp::create_mcp_client().await {
                 Ok(client) => client,
                 Err(e) => {
                     let _ = result_tx.send(Err(anyhow::anyhow!("Failed to create MCP client: {}", e)));
@@ -1429,7 +1618,7 @@ impl IntelligentToolManager {
                 }
 
                 // Call MCP GitHub search
-                match mcp_client.call_tool("github", crate::tools::McpToolCall {
+                match mcp_client.call_tool("github", crate::mcp::McpToolCall {
                     name: "search_repositories".to_string(),
                     arguments: json!({
                         "query": search_query,
@@ -1508,8 +1697,8 @@ impl IntelligentToolManager {
             }
             Err(_) => {
                 // Fallback to MCP memory server if internal memory fails
-                let mcp_client = crate::tools::create_mcp_client().await?;
-                match mcp_client.call_tool("memory", crate::tools::McpToolCall {
+                let mcp_client = crate::mcp::create_mcp_client().await?;
+                match mcp_client.call_tool("memory", crate::mcp::McpToolCall {
                     name: "search_nodes".to_string(),
                     arguments: json!({
                         "query": query
@@ -1544,11 +1733,11 @@ impl IntelligentToolManager {
             .unwrap_or("postgres");
 
         // Create MCP client for database operations
-        let mcp_client = crate::tools::create_mcp_client().await?;
+        let mcp_client = crate::mcp::create_mcp_client().await?;
 
         match database_type {
             "postgres" => {
-                match mcp_client.call_tool("postgres", crate::tools::McpToolCall {
+                match mcp_client.call_tool("postgres", crate::mcp::McpToolCall {
                     name: "query".to_string(),
                     arguments: json!({
                         "sql": query
@@ -1572,7 +1761,7 @@ impl IntelligentToolManager {
                 }
             }
             "sqlite" => {
-                match mcp_client.call_tool("sqlite", crate::tools::McpToolCall {
+                match mcp_client.call_tool("sqlite", crate::mcp::McpToolCall {
                     name: "query".to_string(),
                     arguments: json!({
                         "sql": query
@@ -5396,13 +5585,16 @@ impl IntelligentToolManager {
     ) -> Result<Self> {
         info!("🧠 Initializing Intelligent Tool Manager with Emergent Capabilities");
 
-        let base_manager = Self::new(character, memory, safety_validator, config).await?;
+        let base_manager = Self::new_with_components(character, memory, safety_validator, config).await?;
 
         // Initialize emergent tool usage engine
         let emergent_engine = Arc::new(EmergentToolUsageEngine::new().await?);
 
         // Enhance with emergent capabilities
-        let enhanced_manager = Self { emergent_engine: Some(emergent_engine), ..base_manager };
+        let enhanced_manager = Self { 
+            emergent_engine: Arc::new(parking_lot::RwLock::new(Some(emergent_engine))), 
+            ..base_manager 
+        };
 
         // Start emergent pattern detection
         enhanced_manager.start_emergent_pattern_detection().await?;
@@ -5516,8 +5708,10 @@ impl IntelligentToolManager {
     ) -> Result<Vec<EmergentPattern>> {
         let emergent_engine = self
             .emergent_engine
+            .read()
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Emergent engine not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("Emergent engine not initialized"))?
+            .clone();
 
         // Analyze request characteristics
         let request_characteristics = self.analyze_request_characteristics(request).await?;
@@ -5729,8 +5923,10 @@ impl IntelligentToolManager {
     async fn start_emergent_pattern_detection(&self) -> Result<()> {
         let emergent_engine = self
             .emergent_engine
+            .read()
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Emergent engine not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("Emergent engine not initialized"))?
+            .clone();
 
         let engine = emergent_engine.clone();
         let usage_patterns = self.usage_patterns.clone();
@@ -5752,8 +5948,10 @@ impl IntelligentToolManager {
     pub async fn get_emergent_analytics(&self) -> Result<EmergentAnalytics> {
         let emergent_engine = self
             .emergent_engine
+            .read()
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Emergent engine not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("Emergent engine not initialized"))?
+            .clone();
 
         let (pattern_analytics, evolution_analytics, capability_analytics, autonomy_analytics) = tokio::try_join!(
             emergent_engine.get_pattern_analytics(),
@@ -6265,6 +6463,14 @@ impl IntelligentToolManager {
     /// Get list of available tools based on registered patterns and sessions
     pub async fn get_available_tools(&self) -> Result<Vec<String>> {
         let mut available_tools = HashSet::new();
+        
+        // First try to discover tools dynamically if discovery engine is available
+        if let Some(discovery) = self.tool_discovery.read().await.as_ref() {
+            let discovered = discovery.get_all_tools().await;
+            for tool in discovered {
+                available_tools.insert(tool.name);
+            }
+        }
 
         // Get tools from usage patterns
         let usage_patterns = self.usage_patterns.read();
@@ -6287,7 +6493,7 @@ impl IntelligentToolManager {
             available_tools.insert(session.tool_id.clone());
         }
         
-        // If no tools found in patterns, use the tool registry
+        // If no tools found in patterns or discovery, use the tool registry
         if available_tools.is_empty() {
             let tool_registry = crate::tools::get_tool_registry();
             for tool_info in tool_registry {

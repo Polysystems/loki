@@ -436,12 +436,12 @@ impl ToolDiscoveryEngine {
         params: &serde_json::Value,
     ) -> Result<()> {
         let params_obj = params.as_object()
-            .ok_or_else(|| anyhow::anyhow!("Parameters must be an object"))?;
+            .ok_or_else(|| anyhow::anyhow!("Tool parameters must be a JSON object, received: {:?}", params))?;
         
         // Check required parameters
         for param in &tool.parameters {
             if param.required && !params_obj.contains_key(&param.name) {
-                return Err(anyhow::anyhow!("Missing required parameter: {}", param.name));
+                return Err(anyhow::anyhow!("Missing required parameter '{}' for tool '{}'", param.name, tool.name));
             }
             
             // Validate parameter type and constraints
@@ -463,27 +463,27 @@ impl ToolDiscoveryEngine {
         match &param.param_type {
             ParameterType::String => {
                 if !value.is_string() {
-                    return Err(anyhow::anyhow!("Parameter {} must be a string", param.name));
+                    return Err(anyhow::anyhow!("Parameter '{}' must be a string, received: {:?}", param.name, value));
                 }
             }
             ParameterType::Number => {
                 if !value.is_number() {
-                    return Err(anyhow::anyhow!("Parameter {} must be a number", param.name));
+                    return Err(anyhow::anyhow!("Parameter '{}' must be a number, received: {:?}", param.name, value));
                 }
             }
             ParameterType::Boolean => {
                 if !value.is_boolean() {
-                    return Err(anyhow::anyhow!("Parameter {} must be a boolean", param.name));
+                    return Err(anyhow::anyhow!("Parameter '{}' must be a boolean, received: {:?}", param.name, value));
                 }
             }
             ParameterType::Array => {
                 if !value.is_array() {
-                    return Err(anyhow::anyhow!("Parameter {} must be an array", param.name));
+                    return Err(anyhow::anyhow!("Parameter '{}' must be an array, received: {:?}", param.name, value));
                 }
             }
             ParameterType::Object => {
                 if !value.is_object() {
-                    return Err(anyhow::anyhow!("Parameter {} must be an object", param.name));
+                    return Err(anyhow::anyhow!("Parameter '{}' must be an object, received: {:?}", param.name, value));
                 }
             }
             ParameterType::Enum(values) => {

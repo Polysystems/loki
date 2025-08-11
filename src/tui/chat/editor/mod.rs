@@ -222,6 +222,118 @@ impl IntegratedEditor {
             LspKind::TypeParameter => CompletionKind::TypeParameter,
         }
     }
+    
+    /// Process a request for editor operations
+    pub async fn process_request(&self, data: serde_json::Value) -> Result<serde_json::Value> {
+        let request_type = data.get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("edit");
+        
+        match request_type {
+            "edit" => {
+                // Apply an edit to the current file
+                if let Ok(action) = serde_json::from_value::<EditAction>(data.get("action").cloned().unwrap_or_default()) {
+                    self.apply_edit(action).await?;
+                    Ok(serde_json::json!({
+                        "status": "applied",
+                        "content": self.get_content().await
+                    }))
+                } else {
+                    Err(anyhow::anyhow!("Invalid edit action"))
+                }
+            },
+            "open" => {
+                // Open a file
+                let path = data.get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing file path"))?;
+                
+                self.open_file(path).await?;
+                Ok(serde_json::json!({
+                    "status": "opened",
+                    "path": path,
+                    "content": self.get_content().await
+                }))
+            },
+            "complete" => {
+                // Get completions at current position
+                let completions = self.get_completions().await;
+                Ok(serde_json::to_value(completions)?)
+            },
+            "highlight" => {
+                // Get syntax highlighting
+                let content = self.get_content().await;
+                let language = data.get("language")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("javascript");
+                
+                // Apply syntax highlighting
+                let mut highlighted_lines = Vec::new();
+                for line in content.lines() {
+                    let tokens = self.syntax.highlight_line(line, language);
+                    highlighted_lines.push(serde_json::json!({
+                        "text": line,
+                        "tokens": tokens.iter().map(|t| serde_json::json!({
+                            "text": t.text,
+                            "type": format!("{:?}", t.token_type),
+                            "style": {
+                                "color": format!("#{:02x}{:02x}{:02x}", t.style.color.r, t.style.color.g, t.style.color.b),
+                                "bold": t.style.bold,
+                                "italic": t.style.italic,
+                                "underline": t.style.underline,
+                            }
+                        })).collect::<Vec<_>>()
+                    }));
+                }
+                
+                Ok(serde_json::json!({
+                    "content": content,
+                    "language": language,
+                    "highlighted": true,
+                    "lines": highlighted_lines,
+                    "theme": self.syntax.get_theme().map(|t| t.name.clone()).unwrap_or_else(|| "default".to_string())
+                }))
+            },
+            _ => {
+                Err(anyhow::anyhow!("Unknown request type: {}", request_type))
+            }
+        }
+    }
+    
+    /// Apply changes to a file
+    pub async fn apply_changes(&self, file: String, changes: Vec<String>) -> Result<()> {
+        tracing::info!("Applying {} changes to file {}", changes.len(), file);
+        
+        // Open the file first
+        self.open_file(&file).await?;
+        
+        // Apply each change as an edit action
+        for (index, change) in changes.iter().enumerate() {
+            let position = crate::tui::chat::editor::editor_core::CursorPosition {
+                line: index,
+                column: 0,
+            };
+            
+            let action = EditAction::Insert {
+                position,
+                text: change.clone(),
+            };
+            
+            self.apply_edit(action).await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Create a new file with content
+    pub async fn create_file(&self, path: String, content: String) -> Result<()> {
+        tracing::info!("Creating file {} with {} bytes of content", path, content.len());
+        
+        // Create and open the new file
+        self.editor.create_file(&path, &content).await?;
+        
+        Ok(())
+    }
 }
 
 /// Diagnostic information

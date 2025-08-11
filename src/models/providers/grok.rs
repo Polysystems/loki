@@ -7,7 +7,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::{Client, header};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_stream::{Stream, StreamExt};
 use tracing::{debug, info};
