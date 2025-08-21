@@ -41,6 +41,7 @@ pub mod decision_engine_integration; // Add decision engine integration with tra
 pub mod decision_learner;
 pub mod decision_tracking; // Add comprehensive decision tracking system
 pub mod distributed_consciousness;
+pub mod lockfree_distributed_consciousness;
 pub mod emergent;
 pub mod emotional_core;
 pub mod empathy_system;

@@ -95,6 +95,9 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 wide = "0.7"
 dashmap = "6.1"
+arc-swap = "1.7"
+crossbeam-queue = "0.3"
+bytes = "1.8"
 rocksdb = "0.22"
 ndarray = "0.16"
 lru = "0.12"
@@ -102,7 +105,6 @@ itertools = "0.13"
 nix = { version = "0.29", features = ["signal", "process"] }
 notify = "7.0"
 directories = "5.0"
-arc-swap = "1.7"
 image = "0.25"
 lz4_flex = "0.11"
 wgpu = "25.0.2"
@@ -136,14 +138,12 @@ winapi = { version = "0.3", features = ["fileapi"] }
 metal = { version = "0.29", optional = true }
 
 # SIMD and performance - Rust 2025 optimizations
-wide = "0.7"   # Stable SIMD operations (fallback)
+# wide already declared above
 rayon = "1.10"
 # Note: std::simd used via nightly feature flags
 
 # Memory and caching
-lru = "0.12"
-rocksdb = "0.22"
-lz4_flex = "0.11"
+# lru, rocksdb, lz4_flex already declared above
 
 # Database support for comprehensive data management
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "sqlite", "mysql", "chrono", "uuid", "json"] }
@@ -152,11 +152,7 @@ mongodb = "3.1"
 redis = "0.27" # Direct Redis client for simple operations
 
 # Model streaming and memory management
-
-crossbeam-channel = "0.5"
-parking_lot = "0.12"
-dashmap = "6.1"
-arc-swap = "1.7"
+# crossbeam-channel, parking_lot, dashmap already declared above
 
 # Cognitive memory structures
 # Graph structures for memory networks

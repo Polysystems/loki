@@ -5,12 +5,18 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use anyhow::{Result, anyhow};
+use dashmap::DashMap;
+use crossbeam_queue::ArrayQueue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot, RwLock, Mutex};
+use tokio::sync::{mpsc, oneshot, RwLock};
+use parking_lot::Mutex;
 use tracing::{info, warn};
+
+use crate::infrastructure::lockfree::LockFreeEventQueue;
 
 use crate::tools::intelligent_manager::{IntelligentToolManager, ToolRequest, ResultType, MemoryIntegration};
 use crate::tools::mcp_client::{McpClient, McpToolCall};
@@ -18,7 +24,7 @@ use crate::tools::task_management::{TaskManager, TaskPriority,  TaskPlatform};
 use crate::models::ModelOrchestrator;
 use crate::tui::chat::core::commands::{ParsedCommand, CommandResult, ResultFormat};
 
-/// Tool executor for chat commands
+/// Tool executor for chat commands (lock-free)
 pub struct ChatToolExecutor {
     /// Tool manager for intelligent tool selection
     tool_manager: Option<Arc<IntelligentToolManager>>,
@@ -32,12 +38,26 @@ pub struct ChatToolExecutor {
     /// Model orchestrator for AI-powered operations
     model_orchestrator: Option<Arc<ModelOrchestrator>>,
     
-    /// Execution state tracking
-    execution_state: Arc<RwLock<ExecutionState>>,
+    /// Active executions (lock-free)
+    active_executions: Arc<DashMap<String, ExecutionInfo>>,
     
-    /// Progress channel for streaming updates
+    /// Execution history (lock-free queue)
+    execution_history: Arc<ArrayQueue<ExecutionRecord>>,
+    
+    /// Workflow definitions (lock-free)
+    workflows: Arc<DashMap<String, WorkflowDefinition>>,
+    
+    /// Execution metrics (atomic)
+    total_executions: Arc<AtomicU64>,
+    successful_executions: Arc<AtomicU64>,
+    failed_executions: Arc<AtomicU64>,
+    
+    /// Progress event queue (lock-free)
+    progress_queue: Arc<LockFreeEventQueue>,
+    
+    /// Progress channel for streaming updates (compatibility)
     progress_tx: mpsc::Sender<ExecutionProgress>,
-    progress_rx: Arc<RwLock<mpsc::Receiver<ExecutionProgress>>>,
+    progress_rx: Arc<Mutex<mpsc::Receiver<ExecutionProgress>>>,
 }
 
 /// State of ongoing executions
@@ -151,9 +171,15 @@ impl ChatToolExecutor {
             mcp_client,
             task_manager,
             model_orchestrator,
-            execution_state: Arc::new(RwLock::new(ExecutionState::default())),
+            active_executions: Arc::new(DashMap::new()),
+            execution_history: Arc::new(ArrayQueue::new(1000)),
+            workflows: Arc::new(DashMap::new()),
+            total_executions: Arc::new(AtomicU64::new(0)),
+            successful_executions: Arc::new(AtomicU64::new(0)),
+            failed_executions: Arc::new(AtomicU64::new(0)),
+            progress_queue: Arc::new(LockFreeEventQueue::new(1000)),
             progress_tx,
-            progress_rx: Arc::new(RwLock::new(progress_rx)),
+            progress_rx: Arc::new(Mutex::new(progress_rx)),
         };
         
         // Initialize built-in workflows
@@ -259,18 +285,21 @@ impl ChatToolExecutor {
     pub async fn execute(&self, command: ParsedCommand) -> Result<CommandResult> {
         let execution_id = uuid::Uuid::new_v4().to_string();
         
-        // Record execution start
+        // Increment total executions counter
+        self.total_executions.fetch_add(1, Ordering::Relaxed);
+        
+        // Record execution start (lock-free)
         let (cancel_tx, cancel_rx) = oneshot::channel();
-        {
-            let mut state = self.execution_state.write().await;
-            state.active_executions.insert(execution_id.clone(), ExecutionInfo {
+        self.active_executions.insert(
+            execution_id.clone(),
+            ExecutionInfo {
                 id: execution_id.clone(),
                 command: command.command.clone(),
                 started_at: std::time::Instant::now(),
                 status: ExecutionStatus::Running,
                 cancel_tx: Some(Arc::new(Mutex::new(Some(cancel_tx)))),
-            });
-        }
+            },
+        );
         
         // Send initial progress
         let _ = self.progress_tx.send(ExecutionProgress {
@@ -304,25 +333,31 @@ impl ChatToolExecutor {
             _ => Err(anyhow!("Command execution not implemented: {}", command.command)),
         };
         
-        // Record execution completion
+        // Record execution completion (lock-free)
         let status = match &result {
-            Ok(_) => ExecutionStatus::Completed,
-            Err(_) => ExecutionStatus::Failed,
+            Ok(_) => {
+                self.successful_executions.fetch_add(1, Ordering::Relaxed);
+                ExecutionStatus::Completed
+            },
+            Err(_) => {
+                self.failed_executions.fetch_add(1, Ordering::Relaxed);
+                ExecutionStatus::Failed
+            },
         };
         
-        {
-            let mut state = self.execution_state.write().await;
-            if let Some(mut info) = state.active_executions.remove(&execution_id) {
-                info.status = status.clone();
-                state.history.push(ExecutionRecord {
-                    id: info.id,
-                    command: info.command,
-                    started_at: info.started_at,
-                    completed_at: std::time::Instant::now(),
-                    status,
-                    result: result.as_ref().ok().cloned(),
-                });
-            }
+        // Remove from active and add to history
+        if let Some((_, mut info)) = self.active_executions.remove(&execution_id) {
+            info.status = status.clone();
+            let record = ExecutionRecord {
+                id: info.id,
+                command: info.command,
+                started_at: info.started_at,
+                completed_at: std::time::Instant::now(),
+                status,
+                result: result.as_ref().ok().cloned(),
+            };
+            // Try to add to history queue (may fail if full)
+            let _ = self.execution_history.push(record);
         }
         
         // Send completion progress
@@ -816,35 +851,38 @@ impl ChatToolExecutor {
     }
     
     /// Get progress receiver
-    pub fn get_progress_receiver(&self) -> Arc<RwLock<mpsc::Receiver<ExecutionProgress>>> {
+    pub fn get_progress_receiver(&self) -> Arc<Mutex<mpsc::Receiver<ExecutionProgress>>> {
         self.progress_rx.clone()
     }
     
     /// Cancel an execution
     pub async fn cancel_execution(&self, execution_id: &str) -> Result<()> {
-        let mut state = self.execution_state.write().await;
-        if let Some( info) = state.active_executions.get_mut(execution_id) {
-            if let Some(cancel_tx_mutex) = &info.cancel_tx {
-                let mut cancel_tx_opt = cancel_tx_mutex.lock().await;
-                if let Some(cancel_tx) = cancel_tx_opt.take() {
-                    let _ = cancel_tx.send(());
-                    info.status = ExecutionStatus::Cancelled;
-                    Ok(())
+        // Use DashMap's entry API for atomic update
+        match self.active_executions.get_mut(execution_id) {
+            Some(mut info) => {
+                // Clone the cancel_tx to avoid borrow issues
+                let cancel_tx_mutex = info.cancel_tx.clone();
+                
+                if let Some(cancel_tx_mutex) = cancel_tx_mutex {
+                    let mut cancel_tx_opt = cancel_tx_mutex.lock();
+                    if let Some(cancel_tx) = cancel_tx_opt.take() {
+                        let _ = cancel_tx.send(());
+                        info.status = ExecutionStatus::Cancelled;
+                        Ok(())
+                    } else {
+                        Err(anyhow!("Execution already completed or cancelled"))
+                    }
                 } else {
                     Err(anyhow!("Execution already completed or cancelled"))
                 }
-            } else {
-                Err(anyhow!("Execution already completed or cancelled"))
             }
-        } else {
-            Err(anyhow!("Execution not found"))
+            None => Err(anyhow!("Execution not found"))
         }
     }
     
     /// Get execution status
     pub async fn get_execution_status(&self, execution_id: &str) -> Option<ExecutionStatus> {
-        let state = self.execution_state.read().await;
-        state.active_executions.get(execution_id).map(|info| info.status.clone())
+        self.active_executions.get(execution_id).map(|entry| entry.status.clone())
     }
     
     /// Execute code in various languages
@@ -1729,4 +1767,53 @@ edition = "2021"
             _ => Err(anyhow!("Unknown collaboration action: {}", action)),
         }
     }
+    
+    /// Get execution statistics (lock-free read)
+    pub fn get_statistics(&self) -> ExecutionStatistics {
+        ExecutionStatistics {
+            total_executions: self.total_executions.load(Ordering::Relaxed),
+            successful_executions: self.successful_executions.load(Ordering::Relaxed),
+            failed_executions: self.failed_executions.load(Ordering::Relaxed),
+            active_executions: self.active_executions.len(),
+            history_size: self.execution_history.len(),
+        }
+    }
+    
+    /// Get active executions (lock-free iteration)
+    pub fn get_active_executions(&self) -> Vec<ExecutionInfo> {
+        self.active_executions
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+    
+    /// Get execution history (lock-free access)
+    pub fn get_execution_history(&self, limit: usize) -> Vec<ExecutionRecord> {
+        let mut history = Vec::with_capacity(limit.min(self.execution_history.len()));
+        
+        // Pop from queue up to limit (non-blocking)
+        for _ in 0..limit {
+            match self.execution_history.pop() {
+                Some(record) => history.push(record),
+                None => break,
+            }
+        }
+        
+        // Re-push items back to maintain history (in reverse order)
+        for record in history.iter().rev() {
+            let _ = self.execution_history.push(record.clone());
+        }
+        
+        history
+    }
+}
+
+/// Execution statistics
+#[derive(Debug, Clone)]
+pub struct ExecutionStatistics {
+    pub total_executions: u64,
+    pub successful_executions: u64,
+    pub failed_executions: u64,
+    pub active_executions: usize,
+    pub history_size: usize,
 }

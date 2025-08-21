@@ -13,6 +13,7 @@ macro_rules! hot_path {
 
 // Core error handling system
 pub mod error;
+pub mod infrastructure;
 pub mod zero_cost_validation;
 pub mod code_generation_analysis;
 pub mod compiler_backend_optimization;

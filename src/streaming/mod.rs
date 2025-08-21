@@ -4,12 +4,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, bounded};
-use parking_lot::RwLock;
+use dashmap::DashMap;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 pub mod buffer;
 pub mod enhanced_context_processor;
+pub mod lockfree_enhanced_context_processor;
 pub mod pipeline;
 pub mod processor;
 pub mod consciousness_bridge;
@@ -20,7 +21,7 @@ pub use processor::{ProcessorConfig, StreamProcessor};
 pub use consciousness_bridge::StreamingConsciousnessBridge;
 
 /// Stream type identifier
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamId(pub String);
 
 impl std::fmt::Display for StreamId {
@@ -30,10 +31,11 @@ impl std::fmt::Display for StreamId {
 }
 
 /// Stream data chunk
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StreamChunk {
     pub stream_id: StreamId,
     pub sequence: u64,
+    #[serde(skip, default = "Instant::now")]  // Instant can't be serialized directly
     pub timestamp: Instant,
     pub data: Vec<u8>,
     pub metadata: HashMap<String, String>,
@@ -70,10 +72,10 @@ pub struct LegacyStreamConfig {
 
 
 #[derive(Clone, Debug)]
-/// Stream manager for handling multiple concurrent streams
+/// Stream manager for handling multiple concurrent streams (lock-free)
 pub struct StreamManager {
-    streams: Arc<RwLock<HashMap<StreamId, StreamHandle>>>,
-    pipelines: Arc<RwLock<HashMap<StreamId, Arc<StreamPipeline>>>>,
+    streams: Arc<DashMap<StreamId, StreamHandle>>,
+    pipelines: Arc<DashMap<StreamId, Arc<StreamPipeline>>>,
     event_bus: broadcast::Sender<StreamEvent>,
     config: crate::config::Config,
     model_loader: Arc<crate::models::ModelLoader>,
@@ -114,8 +116,8 @@ impl StreamManager {
         let compute_manager = Arc::new(crate::compute::ComputeManager::new()?);
 
         Ok(Self {
-            streams: Arc::new(RwLock::new(HashMap::new())),
-            pipelines: Arc::new(RwLock::new(HashMap::new())),
+            streams: Arc::new(DashMap::new()),
+            pipelines: Arc::new(DashMap::new()),
             event_bus: event_sender,
             config,
             model_loader,
@@ -188,8 +190,8 @@ impl StreamManager {
             stats: StreamStats::default(),
         };
 
-        self.streams.write().insert(stream_id.clone(), handle);
-        self.pipelines.write().insert(stream_id.clone(), pipeline);
+        self.streams.insert(stream_id.clone(), handle);
+        self.pipelines.insert(stream_id.clone(), pipeline);
 
         // Emit event
         let _ = self.event_bus.send(StreamEvent::StreamStarted(stream_id.clone()));
@@ -200,8 +202,7 @@ impl StreamManager {
 
     /// Send data to a stream
     pub fn send(&self, stream_id: &StreamId, chunk: StreamChunk) -> Result<()> {
-        let streams = self.streams.read();
-        let handle = streams
+        let handle = self.streams
             .get(stream_id)
             .ok_or_else(|| anyhow::anyhow!("Stream not found: {:?}", stream_id))?;
 
@@ -211,8 +212,7 @@ impl StreamManager {
 
     /// Receive processed data from a stream
     pub fn receive(&self, stream_id: &StreamId) -> Result<Option<StreamChunk>> {
-        let streams = self.streams.read();
-        let handle = streams
+        let handle = self.streams
             .get(stream_id)
             .ok_or_else(|| anyhow::anyhow!("Stream not found: {:?}", stream_id))?;
 
@@ -221,8 +221,8 @@ impl StreamManager {
 
     /// Stop a stream
     pub async fn stop_stream(&self, stream_id: &StreamId) -> Result<()> {
-        self.streams.write().remove(stream_id);
-        self.pipelines.write().remove(stream_id);
+        self.streams.remove(stream_id);
+        self.pipelines.remove(stream_id);
 
         let _ = self.event_bus.send(StreamEvent::StreamStopped(stream_id.clone()));
 
@@ -232,7 +232,7 @@ impl StreamManager {
 
     /// Get stream statistics
     pub fn stream_stats(&self, stream_id: &StreamId) -> Option<StreamStats> {
-        self.streams.read().get(stream_id).map(|handle| handle.stats.clone())
+        self.streams.get(stream_id).map(|handle| handle.stats.clone())
     }
 
     /// Subscribe to stream events
@@ -242,7 +242,7 @@ impl StreamManager {
 
     /// List active streams
     pub fn list_streams(&self) -> Vec<(StreamId, LegacyStreamConfig)> {
-        self.streams.read().iter().map(|(id, handle)| (id.clone(), handle.config.clone())).collect()
+        self.streams.iter().map(|entry| (entry.key().clone(), entry.value().config.clone())).collect()
     }
 
     /// Create a session-specific stream
@@ -264,7 +264,7 @@ impl StreamManager {
         let stream_name = format!("session_{}", session_id);
         let stream_id = StreamId(stream_name);
 
-        if self.streams.read().contains_key(&stream_id) {
+        if self.streams.contains_key(&stream_id) {
             self.stop_stream(&stream_id).await?;
         }
 
@@ -278,8 +278,8 @@ impl Default for StreamManager {
         let config = crate::config::Config::default();
         
         Self {
-            streams: Arc::new(RwLock::new(HashMap::new())),
-            pipelines: Arc::new(RwLock::new(HashMap::new())),
+            streams: Arc::new(DashMap::new()),
+            pipelines: Arc::new(DashMap::new()),
             event_bus: event_sender,
             config: config.clone(),
             model_loader: Arc::new(crate::models::ModelLoader::new(config.clone()).unwrap_or_else(|_| {
@@ -328,13 +328,13 @@ async fn stream_processing_loop(
     info!("Stream processing loop ended for {:?}", stream_id);
 }
 
-/// Optimized model cluster with enum-based dispatch for better performance
+/// Optimized model cluster with enum-based dispatch for better performance (lock-free)
 pub struct ModelCluster {
     // Use enum types for zero-cost dispatch in hot paths
-    models: Arc<RwLock<HashMap<String, ModelInstanceType>>>,
+    models: Arc<DashMap<String, ModelInstanceType>>,
     // Keep trait objects for extensibility (non-hot path)
-    trait_models: Arc<RwLock<HashMap<String, Arc<dyn ModelInstance>>>>,
-    routing_table: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    trait_models: Arc<DashMap<String, Arc<dyn ModelInstance>>>,
+    routing_table: Arc<DashMap<String, Vec<String>>>,
 }
 
 /// Optimized enum-based model instance for reduced dispatch overhead
@@ -412,9 +412,9 @@ impl ModelCluster {
     /// Create a new model cluster
     pub fn new() -> Self {
         Self {
-            models: Arc::new(RwLock::new(HashMap::new())),
-            trait_models: Arc::new(RwLock::new(HashMap::new())),
-            routing_table: Arc::new(RwLock::new(HashMap::new())),
+            models: Arc::new(DashMap::new()),
+            trait_models: Arc::new(DashMap::new()),
+            routing_table: Arc::new(DashMap::new()),
         }
     }
 
@@ -423,11 +423,13 @@ impl ModelCluster {
         let model_id = model.id().to_string();
         let device_id = model.device_id().to_string();
 
-        self.models.write().insert(model_id.clone(), model);
+        self.models.insert(model_id.clone(), model);
 
         // Update routing table
-        let mut routing = self.routing_table.write();
-        routing.entry(device_id).or_insert_with(Vec::new).push(model_id);
+        self.routing_table
+            .entry(device_id)
+            .or_insert_with(Vec::new)
+            .push(model_id);
     }
 
     /// Add a trait-based model instance (for compatibility)
@@ -435,22 +437,24 @@ impl ModelCluster {
         let model_id = model.id().to_string();
         let device_id = model.device_id().to_string();
 
-        self.trait_models.write().insert(model_id.clone(), model);
+        self.trait_models.insert(model_id.clone(), model);
 
         // Update routing table
-        let mut routing = self.routing_table.write();
-        routing.entry(device_id).or_insert_with(Vec::new).push(model_id);
+        self.routing_table
+            .entry(device_id)
+            .or_insert_with(Vec::new)
+            .push(model_id);
     }
 
     /// Get models on a specific device
     pub fn models_on_device(&self, device_id: &str) -> Vec<String> {
-        self.routing_table.read().get(device_id).cloned().unwrap_or_default()
+        self.routing_table.get(device_id).map(|entry| entry.value().clone()).unwrap_or_default()
     }
 
     /// Get an optimized model instance (fast path)
     #[inline] // Hot path for model lookups
     pub fn get_model_fast(&self, model_id: &str) -> Option<ModelInstanceType> {
-        self.models.read().get(model_id).cloned()
+        self.models.get(model_id).map(|entry| entry.value().clone())
     }
 
     /// Get a trait-based model instance (compatibility path)
@@ -485,11 +489,11 @@ impl ModelCluster {
         }
 
         // Fallback to trait models
-        self.trait_models.read().get(model_id).cloned()
+        self.trait_models.get(model_id).map(|entry| entry.value().clone())
     }
 
     /// List all models
     pub fn list_models(&self) -> Vec<String> {
-        self.models.read().keys().cloned().collect()
+        self.models.iter().map(|entry| entry.key().clone()).collect()
     }
 }

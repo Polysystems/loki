@@ -5,15 +5,34 @@
 
 use std::collections::{HashMap, VecDeque, BinaryHeap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, mpsc};
+use dashmap::DashMap;
+use crossbeam_channel::{unbounded, Sender, Receiver};
+use tokio::sync::mpsc;
+use bytes::Bytes;
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use tracing::{debug, info, error};
 use anyhow::Result;
 
+use crate::infrastructure::lockfree::{LockFreeEventQueue, EventRouter, Event as LockFreeEvent, EventPriority as LockFreePriority, IndexedRingBuffer, HasTimestamp};
+
 use crate::tools::{ToolResult, ToolStatus};
 use crate::cognitive::agents::AgentSpecialization;
+
+/// Wrapper for SystemEvent with timestamp for lock-free storage
+#[derive(Debug, Clone)]
+pub struct EventHistoryEntry {
+    pub event: SystemEvent,
+    pub timestamp: Instant,
+}
+
+impl HasTimestamp for EventHistoryEntry {
+    fn timestamp(&self) -> Instant {
+        self.timestamp
+    }
+}
 
 /// Unique identifier for tabs
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -292,59 +311,33 @@ impl std::fmt::Debug for EventFilter {
     }
 }
 
-/// Circular buffer for event history
-pub struct CircularBuffer<T> {
-    buffer: VecDeque<T>,
-    capacity: usize,
-}
 
-impl<T> CircularBuffer<T> {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            buffer: VecDeque::with_capacity(capacity),
-            capacity,
-        }
-    }
-    
-    pub fn push(&mut self, item: T) {
-        if self.buffer.len() >= self.capacity {
-            self.buffer.pop_front();
-        }
-        self.buffer.push_back(item);
-    }
-    
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.buffer.iter()
-    }
-    
-    pub fn len(&self) -> usize {
-        self.buffer.len()
-    }
-}
-
-/// Main event bus implementation
+/// Main event bus implementation (lock-free)
 pub struct EventBus {
-    /// Subscribers organized by event type
-    subscribers: Arc<RwLock<HashMap<String, Vec<Subscriber>>>>,
+    /// Subscribers organized by event type (lock-free)
+    subscribers: Arc<DashMap<String, Vec<Subscriber>>>,
     
-    /// Global subscribers that receive all events
-    global_subscribers: Arc<RwLock<Vec<Subscriber>>>,
+    /// Global subscribers that receive all events (lock-free)
+    global_subscribers: Arc<DashMap<usize, Subscriber>>,
     
-    /// Standard event queue
-    event_queue: Arc<RwLock<VecDeque<SystemEvent>>>,
+    /// Lock-free event queue
+    event_queue: Arc<LockFreeEventQueue>,
     
-    /// Priority event queue
-    priority_queue: Arc<RwLock<BinaryHeap<PriorityEvent>>>,
+    /// Event router for topic-based routing
+    event_router: Arc<EventRouter>,
     
-    /// Event history for replay and debugging
-    event_history: Arc<RwLock<CircularBuffer<SystemEvent>>>,
+    /// Event history for replay and debugging (lock-free)
+    event_history: Arc<IndexedRingBuffer<EventHistoryEntry>>,
     
-    /// Event processing channel
-    event_tx: mpsc::UnboundedSender<PriorityEvent>,
-    event_rx: Arc<RwLock<mpsc::UnboundedReceiver<PriorityEvent>>>,
+    /// Event processing channel (lock-free)
+    event_tx: Sender<PriorityEvent>,
+    event_rx: Receiver<PriorityEvent>,
     
-    /// Statistics
-    stats: Arc<RwLock<EventBusStats>>,
+    /// Statistics (atomic)
+    events_published: Arc<AtomicUsize>,
+    events_processed: Arc<AtomicUsize>,
+    events_failed: Arc<AtomicUsize>,
+    subscribers_count: Arc<AtomicUsize>,
 }
 
 /// Event bus statistics
@@ -360,17 +353,20 @@ pub struct EventBusStats {
 impl EventBus {
     /// Create a new event bus
     pub fn new(history_capacity: usize) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = unbounded();
         
         Self {
-            subscribers: Arc::new(RwLock::new(HashMap::new())),
-            global_subscribers: Arc::new(RwLock::new(Vec::new())),
-            event_queue: Arc::new(RwLock::new(VecDeque::new())),
-            priority_queue: Arc::new(RwLock::new(BinaryHeap::new())),
-            event_history: Arc::new(RwLock::new(CircularBuffer::new(history_capacity))),
+            subscribers: Arc::new(DashMap::new()),
+            global_subscribers: Arc::new(DashMap::new()),
+            event_queue: Arc::new(LockFreeEventQueue::new(10000)),
+            event_router: Arc::new(EventRouter::new(10000)),
+            event_history: Arc::new(IndexedRingBuffer::new(history_capacity)),
             event_tx: tx,
-            event_rx: Arc::new(RwLock::new(rx)),
-            stats: Arc::new(RwLock::new(EventBusStats::default())),
+            event_rx: rx,
+            events_published: Arc::new(AtomicUsize::new(0)),
+            events_processed: Arc::new(AtomicUsize::new(0)),
+            events_failed: Arc::new(AtomicUsize::new(0)),
+            subscribers_count: Arc::new(AtomicUsize::new(0)),
         }
     }
     
@@ -381,15 +377,13 @@ impl EventBus {
         subscriber: Subscriber,
     ) -> Result<String> {
         let subscriber_id = subscriber.id.clone();
-        let mut subscribers = self.subscribers.write().await;
         
-        subscribers
+        self.subscribers
             .entry(event_type.clone())
             .or_insert_with(Vec::new)
             .push(subscriber);
         
-        let mut stats = self.stats.write().await;
-        stats.subscribers_count += 1;
+        self.subscribers_count.fetch_add(1, Ordering::Relaxed);
         
         info!("Subscriber {} registered for event type: {}", subscriber_id, event_type);
         Ok(subscriber_id)
@@ -398,11 +392,8 @@ impl EventBus {
     /// Subscribe to all events
     pub async fn subscribe_global(&self, subscriber: Subscriber) -> Result<String> {
         let subscriber_id = subscriber.id.clone();
-        let mut global_subscribers = self.global_subscribers.write().await;
-        global_subscribers.push(subscriber);
-        
-        let mut stats = self.stats.write().await;
-        stats.subscribers_count += 1;
+        let subscriber_key = self.subscribers_count.fetch_add(1, Ordering::Relaxed);
+        self.global_subscribers.insert(subscriber_key, subscriber);
         
         info!("Global subscriber {} registered", subscriber_id);
         Ok(subscriber_id)
@@ -411,18 +402,16 @@ impl EventBus {
     /// Unsubscribe from events
     pub async fn unsubscribe(&self, subscriber_id: &str) -> Result<()> {
         // Remove from specific subscriptions
-        let mut subscribers = self.subscribers.write().await;
-        for (_, subs) in subscribers.iter_mut() {
-            subs.retain(|s| s.id != subscriber_id);
+        for mut entry in self.subscribers.iter_mut() {
+            entry.value_mut().retain(|s| s.id != subscriber_id);
         }
         
         // Remove from global subscriptions
-        let mut global_subscribers = self.global_subscribers.write().await;
-        global_subscribers.retain(|s| s.id != subscriber_id);
+        self.global_subscribers.retain(|_, subscriber| subscriber.id != subscriber_id);
         
-        let mut stats = self.stats.write().await;
-        if stats.subscribers_count > 0 {
-            stats.subscribers_count -= 1;
+        let current = self.subscribers_count.load(Ordering::Relaxed);
+        if current > 0 {
+            self.subscribers_count.store(current - 1, Ordering::Relaxed);
         }
         
         info!("Subscriber {} unregistered", subscriber_id);
@@ -449,15 +438,17 @@ impl EventBus {
         };
         
         // Add to history
-        let mut history = self.event_history.write().await;
-        history.push(event.clone());
+        let history_entry = EventHistoryEntry {
+            event: event.clone(),
+            timestamp: Instant::now(),
+        };
+        self.event_history.push(history_entry);
         
         // Send through channel for processing
         self.event_tx.send(priority_event)?;
         
         // Update stats
-        let mut stats = self.stats.write().await;
-        stats.events_published += 1;
+        self.events_published.fetch_add(1, Ordering::Relaxed);
         
         debug!("Event {} published with priority {:?}", event_id, priority);
         Ok(())
@@ -465,16 +456,15 @@ impl EventBus {
     
     /// Process events from the queue
     pub async fn process_events(&self) -> Result<()> {
-        let mut rx = self.event_rx.write().await;
+        // Process events from the receiver
         
-        while let Some(priority_event) = rx.recv().await {
+        while let Ok(priority_event) = self.event_rx.recv() {
             let start = Instant::now();
             let event_type = self.get_event_type(&priority_event.event);
             
-            // Process specific subscribers
-            let subscribers = self.subscribers.read().await;
-            if let Some(subs) = subscribers.get(&event_type) {
-                for subscriber in subs {
+            // Process specific subscribers (DashMap doesn't need .read())
+            if let Some(subs) = self.subscribers.get(&event_type) {
+                for subscriber in subs.iter() {
                     // Apply filter if present
                     if let Some(filter) = &subscriber.filter {
                         if !self.apply_filter(filter, &priority_event.event) {
@@ -485,15 +475,14 @@ impl EventBus {
                     // Call handler
                     if let Err(e) = (subscriber.handler)(priority_event.event.clone()) {
                         error!("Error in subscriber {}: {:?}", subscriber.id, e);
-                        let mut stats = self.stats.write().await;
-                        stats.events_failed += 1;
+                        self.events_failed.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
             
             // Process global subscribers
-            let global_subscribers = self.global_subscribers.read().await;
-            for subscriber in global_subscribers.iter() {
+            for subscriber_entry in self.global_subscribers.iter() {
+                let subscriber = subscriber_entry.value();
                 if let Some(filter) = &subscriber.filter {
                     if !self.apply_filter(filter, &priority_event.event) {
                         continue;
@@ -502,18 +491,14 @@ impl EventBus {
                 
                 if let Err(e) = (subscriber.handler)(priority_event.event.clone()) {
                     error!("Error in global subscriber {}: {:?}", subscriber.id, e);
-                    let mut stats = self.stats.write().await;
-                    stats.events_failed += 1;
+                    self.events_failed.fetch_add(1, Ordering::Relaxed);
                 }
             }
             
             // Update stats
-            let mut stats = self.stats.write().await;
-            stats.events_processed += 1;
-            let latency = start.elapsed().as_millis() as f64;
-            stats.average_latency_ms = 
-                (stats.average_latency_ms * (stats.events_processed - 1) as f64 + latency) 
-                / stats.events_processed as f64;
+            self.events_processed.fetch_add(1, Ordering::Relaxed);
+            let _latency = start.elapsed().as_millis() as f64;
+            // TODO: Update average latency tracking with atomic operations
         }
         
         Ok(())
@@ -584,13 +569,19 @@ impl EventBus {
     
     /// Get event history
     pub async fn get_history(&self) -> Vec<SystemEvent> {
-        let history = self.event_history.read().await;
-        history.iter().cloned().collect()
+        let history = self.event_history.get_all();
+        history.into_iter().map(|entry| entry.event).collect()
     }
     
     /// Get statistics
     pub async fn get_stats(&self) -> EventBusStats {
-        self.stats.read().await.clone()
+        EventBusStats {
+            events_published: self.events_published.load(Ordering::Relaxed),
+            events_processed: self.events_processed.load(Ordering::Relaxed),
+            events_failed: self.events_failed.load(Ordering::Relaxed),
+            average_latency_ms: 0.0, // TODO: Track this separately if needed
+            subscribers_count: self.subscribers_count.load(Ordering::Relaxed),
+        }
     }
     
     /// Subscribe to all events with a channel
@@ -613,8 +604,7 @@ impl EventBus {
     
     /// Clear event history
     pub async fn clear_history(&self) {
-        let mut history = self.event_history.write().await;
-        *history = CircularBuffer::new(history.capacity);
+        self.event_history.clear();
     }
     
     /// Start the event processing loop
@@ -638,6 +628,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::RwLock;
     
     #[tokio::test]
     async fn test_event_bus_basic() {
