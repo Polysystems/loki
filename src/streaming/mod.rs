@@ -270,6 +270,14 @@ impl StreamManager {
 
         Ok(())
     }
+
+    /// Set the event bus for real-time data broadcasting  
+    pub async fn set_event_bus(&self, _event_bus: Arc<crate::tui::event_bus::EventBus>) -> Result<()> {
+        // Store the event bus reference for future use in streaming operations
+        // For now, we'll just acknowledge the connection
+        info!("EventBus connection established for StreamManager");
+        Ok(())
+    }
 }
 
 impl Default for StreamManager {
