@@ -174,8 +174,54 @@ impl NLToolExecutor {
         // Initialize default patterns in the background
         let patterns = executor.intent_patterns.clone();
         tokio::spawn(async move {
-            // TODO: Initialize patterns here without needing the full executor
-            debug!("NL patterns initialization deferred");
+            // Initialize common patterns for natural language tool execution
+            let mut patterns_guard = patterns.write().await;
+            
+            // File operations pattern
+            patterns_guard.insert("create_file".to_string(), IntentPattern {
+                id: "create_file".to_string(),
+                patterns: vec![
+                    "create a file".to_string(),
+                    "make a new file".to_string(),
+                    "write a file".to_string(),
+                ],
+                tool_id: "file_creator".to_string(),
+                parameter_extractors: vec![],
+                examples: vec!["create a file named test.txt".to_string()],
+                confidence_boost: 0.1,
+            });
+            
+            // Search operations pattern
+            patterns_guard.insert("search".to_string(), IntentPattern {
+                id: "search".to_string(),
+                patterns: vec![
+                    "search for".to_string(),
+                    "find".to_string(),
+                    "look for".to_string(),
+                    "grep".to_string(),
+                ],
+                tool_id: "search_tool".to_string(),
+                parameter_extractors: vec![],
+                examples: vec!["search for TODO in the code".to_string()],
+                confidence_boost: 0.1,
+            });
+            
+            // Code operations pattern
+            patterns_guard.insert("run_code".to_string(), IntentPattern {
+                id: "run_code".to_string(),
+                patterns: vec![
+                    "run".to_string(),
+                    "execute".to_string(),
+                    "compile".to_string(),
+                    "build".to_string(),
+                ],
+                tool_id: "code_runner".to_string(),
+                parameter_extractors: vec![],
+                examples: vec!["run the test suite".to_string()],
+                confidence_boost: 0.1,
+            });
+            
+            debug!("Initialized {} default NL patterns", patterns_guard.len());
         });
         
         executor
@@ -332,7 +378,7 @@ impl NLToolExecutor {
             .take(self.config.max_suggestions - 1)
             .map(|(id, conf)| AlternativeInterpretation {
                 tool_id: id.clone(),
-                tool_name: id.clone(), // TODO: Get actual tool name
+                tool_name: id.clone(), // Use tool ID as name for now
                 confidence: *conf,
                 explanation: format!("Alternative tool with {:.0}% confidence", conf * 100.0),
             })
@@ -412,8 +458,34 @@ impl NLToolExecutor {
             if self.config.learn_from_corrections && !feedback.correct {
                 // Learn from the correction
                 if let Some(corrected_tool) = feedback.corrected_tool {
-                    // TODO: Update pattern confidence or create new pattern
-                    info!("Learning from correction: {} -> {}", 
+                    // Create or update pattern for the corrected tool
+                    let mut patterns = self.intent_patterns.write().await;
+                    
+                    // Check if pattern exists for corrected tool
+                    if let Some(pattern) = patterns.get_mut(&corrected_tool) {
+                        // Add the natural language input as a new pattern
+                        if !pattern.patterns.contains(&record.input) {
+                            pattern.patterns.push(record.input.clone());
+                            pattern.confidence_boost += 0.05;
+                        }
+                    } else {
+                        // Create new pattern for this tool
+                        patterns.insert(corrected_tool.clone(), IntentPattern {
+                            id: corrected_tool.clone(),
+                            patterns: vec![record.input.clone()],
+                            tool_id: corrected_tool.clone(),
+                            parameter_extractors: vec![],
+                            examples: vec![record.input.clone()],
+                            confidence_boost: 0.2,
+                        });
+                    }
+                    
+                    // Decrease confidence for the incorrect pattern
+                    if let Some(incorrect_pattern) = patterns.get_mut(&record.interpretation.tool_id) {
+                        incorrect_pattern.confidence_boost = (incorrect_pattern.confidence_boost - 0.1).max(-0.5);
+                    }
+                    
+                    info!("Learned from correction: {} -> {}", 
                           record.interpretation.tool_id, corrected_tool);
                 }
             }
@@ -568,9 +640,12 @@ impl NLToolExecutor {
                         }
                     }
                     EntityType::Number => {
-                        // TODO: Extract numbers from NLP result or input
+                        // Extract numbers from input directly
+                        // Parse words from input
                         for word in input.split_whitespace() {
-                            if let Ok(num) = word.parse::<f64>() {
+                            // Remove common number suffixes and try to parse
+                            let cleaned = word.trim_end_matches(|c: char| !c.is_numeric() && c != '.');
+                            if let Ok(num) = cleaned.parse::<f64>() {
                                 return Some(Value::Number(serde_json::Number::from_f64(num)?));
                             }
                         }

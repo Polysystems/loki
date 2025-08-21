@@ -4,7 +4,6 @@
 //! requests to appropriate models based on different criteria.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use serde::{Serialize, Deserialize};
 
@@ -83,11 +82,13 @@ impl ModelRouter {
             RoutingStrategy::Cost | RoutingStrategy::CostOptimized => self.route_by_cost(request).await,
             RoutingStrategy::Speed => self.route_by_speed(request).await,
             RoutingStrategy::Quality => self.route_by_quality(request).await,
+            RoutingStrategy::QualityFirst => self.route_by_quality(request).await,
             RoutingStrategy::Availability => self.route_by_availability(request).await,
             RoutingStrategy::Hybrid => self.route_hybrid(request).await,
             RoutingStrategy::RoundRobin => self.route_round_robin(request).await,
             RoutingStrategy::LeastLatency => self.route_by_speed(request).await,
             RoutingStrategy::ContextAware => self.route_by_capability(request).await,
+            RoutingStrategy::Adaptive => self.route_hybrid(request).await,
             RoutingStrategy::Custom(_) => self.route_hybrid(request).await,
         }
     }
@@ -132,7 +133,7 @@ impl ModelRouter {
             })
             .collect();
         
-        cost_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        cost_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         
         // Find cheapest model under threshold
         let selected = cost_sorted.iter()
@@ -189,7 +190,7 @@ impl ModelRouter {
             .filter(|(_, quality)| *quality >= self.config.quality_threshold.into())
             .collect();
         
-        quality_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        quality_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         
         let selected = quality_sorted.first()
             .map(|(name, _)| name.clone())
@@ -296,7 +297,7 @@ impl ModelRouter {
         
         // Sort by score
         let mut sorted: Vec<_> = scores.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         
         let selected = sorted[0].0.clone();
         

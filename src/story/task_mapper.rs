@@ -3,7 +3,11 @@
 use super::types::*;
 use anyhow::Result;
 use std::collections::HashMap;
-use tracing::debug;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use serde::{Serialize, Deserialize};
+use chrono::{DateTime, Utc};
+use tracing::{debug, info};
 
 /// Task mapper for converting between story contexts and actionable tasks
 #[derive(Debug, Clone)]
@@ -288,4 +292,224 @@ impl TaskMapper {
         timeline.sort_by_key(|(time, _)| *time);
         timeline
     }
+}
+
+/// Enhanced story-task mapper with bidirectional mapping support
+pub struct EnhancedTaskMapper {
+    /// Base task mapper
+    base_mapper: TaskMapper,
+    
+    /// Story to todo mappings
+    story_todos: Arc<RwLock<HashMap<StoryId, Vec<TodoMapping>>>>,
+    
+    /// Todo to story mappings  
+    todo_stories: Arc<RwLock<HashMap<String, StoryMapping>>>,
+    
+    /// Narrative threads
+    narrative_threads: Arc<RwLock<Vec<NarrativeThread>>>,
+}
+
+/// Todo mapping from story
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoMapping {
+    pub todo_id: String,
+    pub story_element_id: String,
+    pub element_type: StoryElementType,
+    pub created_at: DateTime<Utc>,
+    pub confidence: f32,
+}
+
+/// Story mapping from todo
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoryMapping {
+    pub story_id: StoryId,
+    pub arc_id: Option<String>,
+    pub plot_point: String,
+    pub narrative_context: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Types of story elements
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StoryElementType {
+    Arc,
+    Chapter,
+    PlotPoint,
+    Event,
+    Character,
+    Setting,
+}
+
+/// Narrative thread connecting multiple tasks/todos
+#[derive(Debug, Clone)]
+pub struct NarrativeThread {
+    pub id: String,
+    pub title: String,
+    pub story_arc: Option<StoryArc>,
+    pub tasks: Vec<String>,
+    pub todos: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub progress: f32,
+}
+
+impl EnhancedTaskMapper {
+    /// Create a new enhanced task mapper
+    pub fn new() -> Self {
+        Self {
+            base_mapper: TaskMapper::new(),
+            story_todos: Arc::new(RwLock::new(HashMap::new())),
+            todo_stories: Arc::new(RwLock::new(HashMap::new())),
+            narrative_threads: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+    
+    /// Map a todo to story elements
+    pub async fn map_todo_to_story(
+        &self,
+        todo_id: String,
+        story_id: StoryId,
+        plot_point: String,
+    ) -> Result<()> {
+        let mut todo_stories = self.todo_stories.write().await;
+        
+        let story_mapping = StoryMapping {
+            story_id: story_id.clone(),
+            arc_id: None,
+            plot_point,
+            narrative_context: String::new(),
+            created_at: Utc::now(),
+        };
+        
+        todo_stories.insert(todo_id.clone(), story_mapping);
+        
+        // Also update story-to-todo mapping
+        let mut story_todos = self.story_todos.write().await;
+        let todo_mapping = TodoMapping {
+            todo_id: todo_id.clone(),
+            story_element_id: story_id.0.to_string(),
+            element_type: StoryElementType::PlotPoint,
+            created_at: Utc::now(),
+            confidence: 0.8,
+        };
+        
+        story_todos.entry(story_id)
+            .or_insert_with(Vec::new)
+            .push(todo_mapping);
+        
+        info!("Mapped todo {} to story", todo_id);
+        Ok(())
+    }
+    
+    /// Get todos associated with a story
+    pub async fn get_story_todos(&self, story_id: &StoryId) -> Vec<TodoMapping> {
+        let story_todos = self.story_todos.read().await;
+        story_todos.get(story_id).cloned().unwrap_or_default()
+    }
+    
+    /// Get story associated with a todo
+    pub async fn get_todo_story(&self, todo_id: &str) -> Option<StoryMapping> {
+        let todo_stories = self.todo_stories.read().await;
+        todo_stories.get(todo_id).cloned()
+    }
+    
+    /// Create a narrative thread
+    pub async fn create_narrative_thread(
+        &self,
+        title: String,
+        story_arc: Option<StoryArc>,
+        todos: Vec<String>,
+    ) -> Result<String> {
+        let thread_id = uuid::Uuid::new_v4().to_string();
+        
+        let thread = NarrativeThread {
+            id: thread_id.clone(),
+            title,
+            story_arc,
+            tasks: Vec::new(),
+            todos,
+            created_at: Utc::now(),
+            progress: 0.0,
+        };
+        
+        let mut threads = self.narrative_threads.write().await;
+        threads.push(thread);
+        
+        info!("Created narrative thread: {}", thread_id);
+        Ok(thread_id)
+    }
+    
+    /// Update thread progress based on todo completion
+    pub async fn update_thread_progress(
+        &self,
+        thread_id: &str,
+        completed_todos: usize,
+        total_todos: usize,
+    ) -> Result<()> {
+        let mut threads = self.narrative_threads.write().await;
+        
+        if let Some(thread) = threads.iter_mut().find(|t| t.id == thread_id) {
+            thread.progress = if total_todos > 0 {
+                completed_todos as f32 / total_todos as f32
+            } else {
+                0.0
+            };
+            
+            debug!("Updated thread {} progress to {:.0}%", thread_id, thread.progress * 100.0);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Thread not found"))
+        }
+    }
+    
+    /// Generate todo suggestions from story context
+    pub async fn suggest_todos_from_story(
+        &self,
+        story: &Story,
+    ) -> Result<Vec<TodoSuggestion>> {
+        let mut suggestions = Vec::new();
+        
+        // Get tasks from base mapper
+        let task_map = self.base_mapper.map_story_to_tasks(story).await?;
+        
+        // Convert tasks to todo suggestions
+        for task in task_map.tasks {
+            if task.status != TaskStatus::Completed {
+                suggestions.push(TodoSuggestion {
+                    title: task.description.clone(),
+                    description: task.story_context.clone(),
+                    priority: match task.status {
+                        TaskStatus::Blocked => "high",
+                        TaskStatus::InProgress => "medium",
+                        _ => "normal",
+                    }.to_string(),
+                    story_element: StoryElementType::PlotPoint,
+                    confidence: 0.8,
+                });
+            }
+        }
+        
+        // Add suggestions from current arc
+        if let Some(current_arc) = story.arcs.last() {
+            // Use arc description as a suggestion
+            suggestions.push(TodoSuggestion {
+                title: format!("Complete arc: {}", current_arc.title),
+                description: current_arc.description.clone(),
+                priority: "high".to_string(),
+                story_element: StoryElementType::Arc,
+                confidence: 0.9,
+            });
+        }
+        
+        Ok(suggestions)
+    }
+}
+
+/// Todo suggestion from story analysis
+#[derive(Debug, Clone)]
+pub struct TodoSuggestion {
+    pub title: String,
+    pub description: String,
+    pub priority: String,
+    pub story_element: StoryElementType,
+    pub confidence: f32,
 }

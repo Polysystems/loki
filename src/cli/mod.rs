@@ -449,7 +449,7 @@ pub enum ModelCommands {
     },
 }
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 pub struct TaskArgs {
     /// Task to execute
     pub task: String,

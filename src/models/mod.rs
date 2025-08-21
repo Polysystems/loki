@@ -374,6 +374,7 @@ async fn handle_test_orchestration(
                 priority: "normal".to_string(),
                 prefer_local,
                 require_streaming: false,
+                task_hint: None,  // Use dynamic orchestration model selection
                 required_capabilities: Vec::new(),
                 creativity_level: None,
                 formality_level: None,
@@ -771,6 +772,7 @@ async fn handle_test_ensemble(
                 priority: "high".to_string(),
                 prefer_local: false,
                 require_streaming: false,
+                task_hint: None,  // Use dynamic orchestration model selection
                 required_capabilities: Vec::new(),
                 creativity_level: None,
                 formality_level: None,
@@ -922,6 +924,7 @@ async fn handle_test_learning(
                 priority: "normal".to_string(),
                 prefer_local: false,
                 require_streaming: false,
+                task_hint: None,  // Use dynamic orchestration model selection
                 required_capabilities: Vec::new(),
                 creativity_level: None,
                 formality_level: None,
@@ -1355,6 +1358,7 @@ async fn handle_test_streaming(
                 priority: "normal".to_string(),
                 prefer_local: _model.is_none(),
                 require_streaming: true,
+                task_hint: None,  // Use dynamic orchestration model selection
                 required_capabilities: Vec::new(),
                 creativity_level: None,
                 formality_level: None,

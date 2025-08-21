@@ -78,6 +78,9 @@ pub enum CognitiveEvent {
     /// Focus shifted
     FocusChanged(String),
     
+    /// Mood changed
+    MoodChanged(String),
+    
     /// Error occurred
     Error(String),
 }
@@ -623,13 +626,139 @@ impl CognitiveIntegration {
                 
                 // Check if cognitive orchestrator is available for real insights
                 if let Some(cognitive_ref) = &cognitive_orchestrator {
-                    // Could integrate real cognitive data here
-                    tracing::debug!("Cognitive monitoring cycle {}", cycle);
+                    // Query real cognitive system for insights
+                    let mental_state = cognitive_ref.get_consciousness_state().await;
+                    // Use awareness_level instead of consciousness_level
+                    let awareness = mental_state.awareness_level;
+                    if awareness > 0.5 {
+                        let _ = event_tx.send(CognitiveEvent::ActivityChanged(awareness));
+                    }
+                    
+                    // Generate insights based on cognitive state metrics
+                    if mental_state.coherence_score > 0.7 && mental_state.processing_efficiency > 0.6 {
+                        let insight = CognitiveInsight {
+                            content: format!("High cognitive coherence detected (score: {:.2})", mental_state.coherence_score),
+                            insight_type: InsightType::Observation,
+                            relevance: mental_state.coherence_score as f32,
+                            timestamp: chrono::Utc::now(),
+                        };
+                        
+                        // Add to buffer
+                        {
+                            let mut buffer = insights.write().await;
+                            buffer.push_front(insight.clone());
+                            while buffer.len() > 100 {
+                                buffer.pop_back();
+                            }
+                        }
+                        
+                        let _ = event_tx.send(CognitiveEvent::NewInsight(insight));
+                    }
+                    
+                    tracing::debug!("Processed cognitive state with awareness: {:.2}, coherence: {:.2}", 
+                        mental_state.awareness_level, mental_state.coherence_score);
                 }
             }
         });
         
         self.monitor_handle = Some(handle);
+    }
+    
+    /// Connect to real cognitive system streams
+    pub async fn connect_streams(
+        &mut self,
+        cognitive_orchestrator: Arc<CognitiveOrchestrator>,
+        cognitive_system: Arc<CognitiveSystem>,
+    ) -> Result<()> {
+        self.cognitive_orchestrator = Some(cognitive_orchestrator.clone());
+        self.cognitive_system = Some(cognitive_system.clone());
+        
+        // Restart monitoring with real connections
+        if let Some(handle) = self.monitor_handle.take() {
+            handle.abort();
+        }
+        self.start_monitoring();
+        
+        // Subscribe to cognitive system events
+        let mut event_receiver = cognitive_orchestrator.subscribe_events();
+        let event_tx = self.event_tx.clone();
+        let insights_buffer = self.insights_buffer.clone();
+        
+        // Spawn task to forward cognitive events
+        tokio::spawn(async move {
+            while let Ok(cog_event) = event_receiver.recv().await {
+                match cog_event {
+                    crate::cognitive::orchestrator::CognitiveEvent::ThoughtGenerated(thought) => {
+                        let insight = CognitiveInsight {
+                            content: thought.content.clone(),
+                            insight_type: InsightType::Observation,
+                            relevance: thought.metadata.importance,
+                            timestamp: chrono::Utc::now(),
+                        };
+                        
+                        // Add to buffer
+                        {
+                            let mut buffer = insights_buffer.write().await;
+                            buffer.push_front(insight.clone());
+                            while buffer.len() > 100 {
+                                buffer.pop_back();
+                            }
+                        }
+                        
+                        let _ = event_tx.send(CognitiveEvent::NewInsight(insight));
+                    },
+                    crate::cognitive::orchestrator::CognitiveEvent::PatternDetected(pattern, confidence) => {
+                        let insight = CognitiveInsight {
+                            content: format!("Pattern detected: {}", pattern),
+                            insight_type: InsightType::Pattern,
+                            relevance: confidence,
+                            timestamp: chrono::Utc::now(),
+                        };
+                        
+                        // Add to buffer
+                        {
+                            let mut buffer = insights_buffer.write().await;
+                            buffer.push_front(insight.clone());
+                            while buffer.len() > 100 {
+                                buffer.pop_back();
+                            }
+                        }
+                        
+                        let _ = event_tx.send(CognitiveEvent::NewInsight(insight));
+                    },
+                    crate::cognitive::orchestrator::CognitiveEvent::EmotionalShift(description) => {
+                        let _ = event_tx.send(CognitiveEvent::MoodChanged(description));
+                    },
+                    crate::cognitive::orchestrator::CognitiveEvent::DecisionMade(decision) => {
+                        let insight = CognitiveInsight {
+                            content: format!("Decision: {} (confidence: {:.1}%)", 
+                                decision.context, decision.confidence * 100.0),
+                            insight_type: InsightType::Suggestion,
+                            relevance: decision.confidence,
+                            timestamp: chrono::Utc::now(),
+                        };
+                        
+                        // Add to buffer
+                        {
+                            let mut buffer = insights_buffer.write().await;
+                            buffer.push_front(insight.clone());
+                            while buffer.len() > 100 {
+                                buffer.pop_back();
+                            }
+                        }
+                        
+                        let _ = event_tx.send(CognitiveEvent::NewInsight(insight));
+                    },
+                    _ => {
+                        // Other events can be handled as needed
+                        tracing::trace!("Received cognitive event: {:?}", cog_event);
+                    }
+                }
+            }
+        });
+        
+        tracing::info!("Connected cognitive streams successfully");
+        Ok(())
     }
     
     /// Subscribe to cognitive events

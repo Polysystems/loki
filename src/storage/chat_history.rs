@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Sqlite, SqlitePool};
 use std::path::PathBuf;
-use tracing::{info, debug, error};
+use tracing::{info, debug};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -452,6 +452,36 @@ impl ChatHistoryStorage {
         }
         
         Ok(search_results)
+    }
+    
+    /// Get all messages for a conversation
+    pub async fn get_conversation_messages(&self, conversation_id: &str) -> Result<Vec<ChatMessage>> {
+        let messages = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, Option<i32>, Option<String>)>(
+            r#"
+            SELECT id, conversation_id, role, content, timestamp, token_count, metadata
+            FROM messages
+            WHERE conversation_id = ?
+            ORDER BY timestamp ASC
+            "#,
+        )
+        .bind(conversation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        let mut chat_messages = Vec::new();
+        for (id, conv_id, role, content, timestamp, token_count, metadata) in messages {
+            chat_messages.push(ChatMessage {
+                id,
+                conversation_id: conv_id,
+                role,
+                content,
+                timestamp,
+                token_count,
+                metadata: metadata.and_then(|m| serde_json::from_str(&m).ok()),
+            });
+        }
+        
+        Ok(chat_messages)
     }
     
     /// Delete a conversation

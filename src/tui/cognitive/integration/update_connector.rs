@@ -204,7 +204,7 @@ impl CognitiveUpdateConnector {
             
             // Monitor for reasoning chain updates
             let task = tokio::spawn(async move {
-                let mut last_chain_id = String::new();
+                let last_chain_id = String::new();
                 let mut ticker = tokio::time::interval(Duration::from_millis(200));
                 
                 while *is_active.read().await {

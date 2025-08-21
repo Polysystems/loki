@@ -17,8 +17,10 @@ impl From<ModularRoutingStrategy> for models::RoutingStrategy {
             ModularRoutingStrategy::Cost => models::RoutingStrategy::CostOptimized,
             ModularRoutingStrategy::Speed => models::RoutingStrategy::LatencyOptimized,
             ModularRoutingStrategy::Quality => models::RoutingStrategy::CapabilityBased,
+            ModularRoutingStrategy::QualityFirst => models::RoutingStrategy::CapabilityBased,
             ModularRoutingStrategy::Availability => models::RoutingStrategy::LoadBased,
             ModularRoutingStrategy::Hybrid => models::RoutingStrategy::LoadBased,
+            ModularRoutingStrategy::Adaptive => models::RoutingStrategy::LoadBased,
         }
     }
 }

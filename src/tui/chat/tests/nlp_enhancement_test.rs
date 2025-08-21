@@ -6,18 +6,56 @@ mod tests {
     use super::super::integrations::nlp::NlpIntegration;
     use std::sync::Arc;
     use crate::tui::nlp::core::orchestrator::{NaturalLanguageOrchestrator, OrchestratorConfig};
+    use crate::cognitive::{
+        memory::CognitiveMemory,
+        consciousness::CognitiveSystem,
+    };
+    use crate::models::orchestrator::ModelOrchestrator;
+    use crate::cognitive::orchestrator::MultiAgentOrchestrator;
+    use crate::tools::intelligent_manager::IntelligentToolManager;
+    use crate::tools::task_management::TaskManager;
+    use crate::mcp::client::McpClient;
+    use crate::cognitive::safety::ActionValidator;
+    use tokio::runtime::Handle;
     
     fn create_mock_orchestrator() -> Arc<NaturalLanguageOrchestrator> {
-        // This would normally require full initialization
-        // For testing, we'll create a minimal mock
-        unimplemented!("Mock orchestrator for testing")
+        // Create a blocking task to initialize the orchestrator
+        // This is a workaround for testing since we can't use async in this context
+        let handle = Handle::current();
+        handle.block_on(async {
+            // Create minimal mock components
+            let cognitive_system = Arc::new(CognitiveSystem::new(Default::default()));
+            let memory = Arc::new(CognitiveMemory::new());
+            let model_orchestrator = Arc::new(ModelOrchestrator::new());
+            let multi_agent = Arc::new(MultiAgentOrchestrator::new());
+            let tool_manager = Arc::new(IntelligentToolManager::new());
+            let task_manager = Arc::new(TaskManager::new());
+            let mcp_client = Arc::new(McpClient::new("test".to_string()));
+            let safety_validator = Arc::new(ActionValidator::new());
+            
+            // Create the orchestrator
+            Arc::new(
+                NaturalLanguageOrchestrator::new(
+                    cognitive_system,
+                    memory,
+                    model_orchestrator,
+                    multi_agent,
+                    tool_manager,
+                    task_manager,
+                    mcp_client,
+                    safety_validator,
+                    OrchestratorConfig::default(),
+                ).await.expect("Failed to create NaturalLanguageOrchestrator")
+            )
+        })
     }
     
     #[tokio::test]
     async fn test_enhanced_nlp_processing() {
         // Create handler with mock orchestrator
         let orchestrator = create_mock_orchestrator();
-        let mut handler = NaturalLanguageHandler::new(orchestrator);
+        let mut handler = NaturalLanguageHandler::new(orchestrator)
+            .expect("Failed to create NaturalLanguageHandler");
         
         // Test basic pattern matching still works
         let result = handler.process("create task to implement user authentication").await;
@@ -33,7 +71,8 @@ mod tests {
     #[tokio::test]
     async fn test_entity_extraction() {
         let orchestrator = create_mock_orchestrator();
-        let handler = NaturalLanguageHandler::new(orchestrator);
+        let handler = NaturalLanguageHandler::new(orchestrator)
+            .expect("Failed to create NaturalLanguageHandler");
         
         // Test various entity types
         let test_cases = vec![
@@ -54,7 +93,8 @@ mod tests {
     #[tokio::test]
     async fn test_sentiment_and_urgency_detection() {
         let orchestrator = create_mock_orchestrator();
-        let mut handler = NaturalLanguageHandler::new(orchestrator);
+        let mut handler = NaturalLanguageHandler::new(orchestrator)
+            .expect("Failed to create NaturalLanguageHandler");
         
         // Test positive sentiment
         let positive_result = handler.process("please create a great new feature").await;
@@ -73,7 +113,8 @@ mod tests {
     #[tokio::test]
     async fn test_context_window_tracking() {
         let orchestrator = create_mock_orchestrator();
-        let mut handler = NaturalLanguageHandler::new(orchestrator);
+        let mut handler = NaturalLanguageHandler::new(orchestrator)
+            .expect("Failed to create NaturalLanguageHandler");
         
         // Process multiple inputs to build context
         let inputs = vec![
@@ -95,7 +136,8 @@ mod tests {
     #[tokio::test]
     async fn test_question_detection() {
         let orchestrator = create_mock_orchestrator();
-        let handler = NaturalLanguageHandler::new(orchestrator);
+        let handler = NaturalLanguageHandler::new(orchestrator)
+            .expect("Failed to create NaturalLanguageHandler");
         
         let questions = vec![
             "what models are available?",
@@ -120,7 +162,8 @@ mod tests {
     #[tokio::test]
     async fn test_verb_pattern_analysis() {
         let orchestrator = create_mock_orchestrator();
-        let mut handler = NaturalLanguageHandler::new(orchestrator);
+        let mut handler = NaturalLanguageHandler::new(orchestrator)
+            .expect("Failed to create NaturalLanguageHandler");
         
         let verb_tests = vec![
             ("analyze the codebase for issues", NlpCommand::Analyze),
@@ -144,7 +187,8 @@ mod tests {
     #[tokio::test]
     async fn test_complex_intent_combinations() {
         let orchestrator = create_mock_orchestrator();
-        let mut handler = NaturalLanguageHandler::new(orchestrator);
+        let mut handler = NaturalLanguageHandler::new(orchestrator)
+            .expect("Failed to create NaturalLanguageHandler");
         
         // Test complex inputs that combine multiple signals
         let complex_inputs = vec![

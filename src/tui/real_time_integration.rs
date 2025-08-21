@@ -17,7 +17,6 @@ use crate::tui::components::CognitiveSystemMetrics;
 use crate::tui::monitoring::real_time_metrics_collector::RealTimeMetricsCollector;
 
 /// Real-time metrics aggregator for TUI integration
-#[derive(Debug)]
 pub struct RealTimeMetricsAggregator {
     /// Cognitive system reference
     cognitive_system: Arc<CognitiveSystem>,

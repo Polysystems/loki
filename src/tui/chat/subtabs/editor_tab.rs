@@ -213,7 +213,7 @@ impl EditorTab {
         ];
         
         // Initialize editor immediately
-        let mut tab = Self {
+        let tab = Self {
             editor: None,
             current_file: None,
             mode: EditorMode::Browse,

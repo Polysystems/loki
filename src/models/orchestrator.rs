@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Result, anyhow};
-use chrono;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -863,6 +862,41 @@ impl ModelOrchestrator {
     pub async fn route_task(&self, task: &TaskRequest) -> Result<ModelSelection> {
         debug!("Routing task: {:?}", task.task_type);
 
+        // Try to load user configuration for model preferences
+        if let Ok(secure_config) = crate::config::setup::SecureConfig::load() {
+            // Map task type to configuration task type
+            let config_task_type = match &task.task_type {
+                TaskType::CodeGeneration { .. } | TaskType::CodeReview { .. } => crate::config::setup::TaskType::Coding,
+                TaskType::CreativeWriting => crate::config::setup::TaskType::Creative,
+                TaskType::LogicalReasoning => crate::config::setup::TaskType::Reasoning,
+                TaskType::DataAnalysis => crate::config::setup::TaskType::DataAnalysis,
+                _ => crate::config::setup::TaskType::Default,
+            };
+            
+            // Check if there's a model assignment for this task type
+            if let Some(assignment) = secure_config.modelconfig.task_assignments.get(&config_task_type) {
+                // Try primary model first
+                match &assignment.primary {
+                    crate::config::setup::ModelReference::Local { model } => {
+                        let local_models = self.local_manager.get_available_models().await;
+                        if local_models.contains(model) {
+                            info!("🎯 Using configured local model: {}", model);
+                            return Ok(ModelSelection::Local(model.clone()));
+                        }
+                    }
+                    crate::config::setup::ModelReference::Api { provider, model: _ } => {
+                        if self.api_providers.contains_key(provider) {
+                            info!("🎯 Using configured API provider: {}", provider);
+                            return Ok(ModelSelection::API(provider.clone()));
+                        }
+                    }
+                    crate::config::setup::ModelReference::Auto => {
+                        // Continue with automatic selection
+                    }
+                }
+            }
+        }
+
         // Special handling for Ollama models - if prefer_local is true and ollama provider exists
         // route directly to ollama
         if task.constraints.prefer_local && self.api_providers.contains_key("ollama") {
@@ -1587,6 +1621,7 @@ impl ModelOrchestrator {
             api_providers: api_status,
             performance_stats,
             routing_strategy: self.routing_strategy.clone(),
+            enabled_models: Vec::new(), // TODO: Populate with actually enabled models
         }
     }
 
@@ -2013,6 +2048,88 @@ impl ModelOrchestrator {
         }
 
         recommendations
+    }
+    
+    /// Get a specific provider by name
+    pub fn get_provider(&self, name: &str) -> Option<Arc<dyn ModelProvider>> {
+        self.api_providers.get(name).cloned()
+    }
+    
+    /// Enable a model for use
+    pub async fn enable_model(&self, model: &str) -> Result<()> {
+        // For now, we'll track this in the usage tracker
+        // In the future, this should be persisted to configuration
+        info!("Enabling model: {}", model);
+        
+        // If it's a local model, ensure it's loaded
+        if !model.contains('/') || model.starts_with("local/") {
+            let model_name = model.trim_start_matches("local/");
+            // Check if model is in the available list
+            let available_models = self.local_manager.get_available_models().await;
+            if !available_models.contains(&model_name.to_string()) {
+                // Try to load the model
+                use crate::models::local_manager::ModelLoadConfig;
+                use crate::models::{ModelCapabilities, ModelSpecialization, ResourceRequirements, QuantizationType};
+                
+                // Detect GPU availability and set appropriate parameters
+                let (gpu_layers, min_gpu_mem, recommended_gpu_mem) = {
+                    #[cfg(feature = "cuda")]
+                    {
+                        // NVIDIA GPU - use all available layers
+                        (Some(99), Some(4.0), Some(8.0))
+                    }
+                    #[cfg(all(feature = "metal", target_os = "macos"))]
+                    {
+                        // Apple Metal - use GPU acceleration
+                        (Some(99), Some(4.0), Some(8.0))
+                    }
+                    #[cfg(not(any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+                    {
+                        // No GPU acceleration available
+                        (None, None, None)
+                    }
+                };
+                
+                let config = ModelLoadConfig {
+                    model_id: model_name.to_string(),
+                    ollama_name: model_name.to_string(),
+                    capabilities: ModelCapabilities::default(),
+                    specializations: vec![ModelSpecialization::GeneralPurpose],
+                    requirements: ResourceRequirements {
+                        min_memory_gb: 2.0,
+                        recommended_memory_gb: 4.0,
+                        min_gpu_memory_gb: min_gpu_mem,
+                        recommended_gpu_memory_gb: recommended_gpu_mem,
+                        cpu_cores: num_cpus::get(),  // Use actual CPU core count
+                        gpu_layers,  // Enable GPU layers if available
+                        quantization: QuantizationType::None,  // Let Ollama handle quantization
+                    },
+                    max_concurrent_requests: 1,
+                };
+                self.local_manager.load_model(config).await?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Disable a model from use
+    pub async fn disable_model(&self, model: &str) -> Result<()> {
+        // For now, we'll track this in the usage tracker
+        // In the future, this should be persisted to configuration
+        info!("Disabling model: {}", model);
+        
+        // If it's a local model, unload it to save resources
+        if !model.contains('/') || model.starts_with("local/") {
+            let model_name = model.trim_start_matches("local/");
+            // Check if model is in the available list (loaded)
+            let available_models = self.local_manager.get_available_models().await;
+            if available_models.contains(&model_name.to_string()) {
+                self.local_manager.unload_model(model_name).await?;
+            }
+        }
+        
+        Ok(())
     }
 }
 
@@ -2876,9 +2993,10 @@ pub struct TaskConstraints {
     pub priority: String,
     pub prefer_local: bool,
     pub require_streaming: bool,
-
-    // Capability requirements
-    pub required_capabilities: Vec<String>,
+    
+    // Model selection hints (not specific models)
+    pub required_capabilities: Vec<String>,  // e.g., ["reasoning", "creativity", "code"]
+    pub task_hint: Option<String>,  // e.g., "analytical", "creative", "social"
 
     // Social and creative constraints
     pub creativity_level: Option<f32>,
@@ -2899,6 +3017,7 @@ impl Default for TaskConstraints {
             prefer_local: false,
             require_streaming: false,
             required_capabilities: Vec::new(),
+            task_hint: None,
             creativity_level: None,
             formality_level: None,
             target_audience: None,
@@ -2950,6 +3069,7 @@ pub struct OrchestrationStatus {
     pub api_providers: HashMap<String, ApiProviderStatus>,
     pub performance_stats: PerformanceStatistics,
     pub routing_strategy: RoutingStrategy,
+    pub enabled_models: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

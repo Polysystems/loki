@@ -12,7 +12,7 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::cognitive::pr_automation::PrAutomationSystem;
 use crate::memory::{CognitiveMemory, MemoryMetadata};

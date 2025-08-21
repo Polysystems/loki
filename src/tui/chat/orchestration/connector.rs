@@ -208,7 +208,9 @@ fn convert_routing_strategy(ui_strategy: &RoutingStrategy) -> crate::models::Rou
         RoutingStrategy::Cost => crate::models::RoutingStrategy::CostOptimized,
         RoutingStrategy::Speed => crate::models::RoutingStrategy::LatencyOptimized,
         RoutingStrategy::Quality => crate::models::RoutingStrategy::CapabilityBased,
+        RoutingStrategy::QualityFirst => crate::models::RoutingStrategy::CapabilityBased,
         RoutingStrategy::Availability => crate::models::RoutingStrategy::LoadBased,
         RoutingStrategy::Hybrid => crate::models::RoutingStrategy::LoadBased,
+        RoutingStrategy::Adaptive => crate::models::RoutingStrategy::LoadBased,
     }
 }

@@ -85,8 +85,34 @@ mod chat_integration_tests {
         let result = chat.initialize_basic_orchestration().await;
         
         if result.is_ok() && chat.model_orchestrator.is_some() {
-            // TODO: Verify strategy is synced to backend
-            // This will be implemented in refactoring
+            // Verify strategy is synced to backend
+            let orchestrator = chat.model_orchestrator.as_ref().unwrap();
+            
+            // Check that the routing strategy matches what we set
+            assert_eq!(
+                orchestrator.routing_strategy,
+                crate::models::RoutingStrategy::CapabilityBased,
+                "Orchestration strategy should be synced to backend"
+            );
+            
+            // Verify orchestration is enabled in the backend
+            assert!(
+                orchestrator.is_orchestration_enabled(),
+                "Orchestration should be enabled in backend"
+            );
+            
+            // Verify the orchestration manager state matches
+            assert_eq!(
+                chat.orchestration_manager.preferred_strategy,
+                orchestrator.routing_strategy,
+                "Frontend and backend strategies should match"
+            );
+            
+            tracing::info!("Strategy sync verification completed successfully");
+        } else {
+            // If initialization failed, test should verify proper error handling
+            assert!(result.is_err() || chat.model_orchestrator.is_none(),
+                "If initialization fails, orchestrator should be None");
         }
     }
 

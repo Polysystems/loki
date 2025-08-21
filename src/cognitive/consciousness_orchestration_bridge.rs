@@ -310,6 +310,7 @@ impl ConsciousnessOrchestrationBridge {
             creativity_level: None,
             formality_level: None,
             target_audience: None,
+            task_hint: None,
         };
 
         let task_request = TaskRequest {
@@ -401,6 +402,7 @@ impl ConsciousnessOrchestrationBridge {
             creativity_level: Some(0.7), // Higher creativity for emotional processing
             formality_level: Some(0.3),  // Lower formality for emotional support
             target_audience: Some("self".to_string()),
+            task_hint: None, // Let orchestrator select based on user config
         };
 
         let task_request = TaskRequest {
@@ -461,6 +463,7 @@ impl ConsciousnessOrchestrationBridge {
             creativity_level: Some(0.9), // Maximum creativity
             formality_level: Some(0.2),  // Low formality for creative work
             target_audience: Some("creative_thinkers".to_string()),
+            task_hint: None,
         };
 
         let task_request = TaskRequest {
@@ -576,6 +579,7 @@ impl ConsciousnessOrchestrationBridge {
             ThoughtType::Intention => TaskType::LogicalReasoning,
             ThoughtType::Social => TaskType::GeneralChat,
             ThoughtType::Planning => TaskType::LogicalReasoning,
+            ThoughtType::Reasoning => TaskType::LogicalReasoning,
         }
     }
 
@@ -599,6 +603,7 @@ impl ConsciousnessOrchestrationBridge {
                 creativity_level: Some(0.3), // Lower creativity for analysis
                 formality_level: Some(0.8),  // Higher formality for analysis
                 target_audience: Some("analytical_thinkers".to_string()),
+                task_hint: None, // Let orchestrator select based on user config
             },
             ThoughtType::Creation => TaskConstraints {
                 max_tokens: Some(3000),
@@ -614,6 +619,7 @@ impl ConsciousnessOrchestrationBridge {
                 creativity_level: Some(0.9), // High creativity for creation
                 formality_level: Some(0.2),  // Low formality for creativity
                 target_audience: Some("creative_minds".to_string()),
+                task_hint: None, // Let orchestrator select based on user config
             },
             ThoughtType::Reflection => TaskConstraints {
                 max_tokens: Some(1500),
@@ -629,6 +635,7 @@ impl ConsciousnessOrchestrationBridge {
                 creativity_level: Some(0.5), // Balanced creativity for reflection
                 formality_level: Some(0.5),  // Balanced formality for reflection
                 target_audience: Some("self".to_string()),
+                task_hint: None, // Let orchestrator select based on user config
             },
             _ => TaskConstraints::default(),
         }

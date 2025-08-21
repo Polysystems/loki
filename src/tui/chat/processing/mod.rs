@@ -6,6 +6,7 @@ pub mod pipeline;
 pub mod streaming;
 pub mod transformers;
 pub mod message_processor;
+pub mod unified_streaming;
 
 // Re-export commonly used types
 pub use pipeline::MessagePipeline;

@@ -21,7 +21,7 @@ pub mod learning;
 #[cfg(test)]
 mod tests;
 
-pub use engine::StoryEngine;
+pub use engine::{StoryEngine, StoryEvent};
 pub use types::*;
 pub use context_chain::ContextChain;
 pub use story_sync::StorySynchronizer;

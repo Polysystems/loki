@@ -8,9 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Sqlite, SqlitePool};
 use std::collections::HashMap;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
-use crate::story::{Story, StoryArc, PlotPoint, StoryType, StoryStatus, PlotType};
+use crate::story::{Story, StoryArc, PlotPoint, StoryType, StoryStatus};
 
 /// Story persistence storage
 pub struct StoryPersistence {

@@ -16,7 +16,7 @@ use crate::models::orchestrator::ModelOrchestrator;
 use crate::models::multi_agent_orchestrator::MultiAgentOrchestrator;
 use crate::tools::IntelligentToolManager;
 use crate::tools::task_management::TaskManager;
-use crate::tools::mcp_client::McpClient;
+use crate::mcp::McpClient;
 use crate::safety::ActionValidator;
 
 /// NLP processing result
@@ -78,25 +78,42 @@ impl NlpIntegration {
             "create".to_string(), "make".to_string(), "build".to_string(),
             "run".to_string(), "execute".to_string(), "start".to_string(),
             "stop".to_string(), "delete".to_string(), "remove".to_string(),
+            "compile".to_string(), "test".to_string(), "deploy".to_string(),
+            "install".to_string(), "update".to_string(), "fix".to_string(),
         ]);
         intent_patterns.insert("request".to_string(), vec![
             "please".to_string(), "could".to_string(), "would".to_string(),
             "can you".to_string(), "help".to_string(), "assist".to_string(),
         ]);
+        intent_patterns.insert("analysis".to_string(), vec![
+            "analyze".to_string(), "explain".to_string(), "describe".to_string(),
+            "understand".to_string(), "review".to_string(), "check".to_string(),
+            "inspect".to_string(), "examine".to_string(), "evaluate".to_string(),
+        ]);
+        intent_patterns.insert("search".to_string(), vec![
+            "find".to_string(), "search".to_string(), "look for".to_string(),
+            "locate".to_string(), "grep".to_string(), "where is".to_string(),
+        ]);
         
         let mut entity_patterns = HashMap::new();
-        entity_patterns.insert(
-            "email".to_string(),
-            regex::Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b").unwrap(),
-        );
-        entity_patterns.insert(
-            "url".to_string(),
-            regex::Regex::new(r"https?://[^\s]+").unwrap(),
-        );
-        entity_patterns.insert(
-            "number".to_string(),
-            regex::Regex::new(r"\b\d+(\.\d+)?\b").unwrap(),
-        );
+        // Use lazy_static or once_cell for these in production, but for now handle errors
+        if let Ok(email_regex) = regex::Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b") {
+            entity_patterns.insert("email".to_string(), email_regex);
+        } else {
+            tracing::warn!("Failed to compile email regex pattern");
+        }
+        
+        if let Ok(url_regex) = regex::Regex::new(r"https?://[^\s]+") {
+            entity_patterns.insert("url".to_string(), url_regex);
+        } else {
+            tracing::warn!("Failed to compile URL regex pattern");
+        }
+        
+        if let Ok(number_regex) = regex::Regex::new(r"\b\d+(\.\d+)?\b") {
+            entity_patterns.insert("number".to_string(), number_regex);
+        } else {
+            tracing::warn!("Failed to compile number regex pattern");
+        }
         
         Self {
             orchestrator: None,
@@ -205,16 +222,29 @@ impl NlpIntegration {
             Some("question") => vec![
                 "Search for answer".to_string(),
                 "Consult knowledge base".to_string(),
+                "Provide detailed explanation".to_string(),
             ],
             Some("command") => vec![
                 "Execute command".to_string(),
                 "Validate parameters".to_string(),
+                "Check permissions".to_string(),
             ],
             Some("request") => vec![
                 "Process request".to_string(),
                 "Gather requirements".to_string(),
+                "Confirm understanding".to_string(),
             ],
-            _ => vec![],
+            Some("analysis") => vec![
+                "Perform analysis".to_string(),
+                "Generate report".to_string(),
+                "Visualize data".to_string(),
+            ],
+            Some("search") => vec![
+                "Search codebase".to_string(),
+                "Query database".to_string(),
+                "Check documentation".to_string(),
+            ],
+            _ => vec!["Clarify intent".to_string()],
         };
         
         // Create result

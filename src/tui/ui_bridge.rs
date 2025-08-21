@@ -8,7 +8,7 @@ use tokio::sync::{RwLock, mpsc};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use anyhow::Result;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::tui::{
     event_bus::{EventBus, SystemEvent, TabId},

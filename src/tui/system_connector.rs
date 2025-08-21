@@ -18,17 +18,12 @@ use crate::{
     monitoring::health::HealthMonitor,
     social::x_client::XClient,
     story::StoryEngine,
-    tools::{IntelligentToolManager, mcp_client::McpClient},
+    tools::IntelligentToolManager,
+    mcp::McpClient,
 };
 
 use crate::tui::system_monitor::SystemMonitor;
 
-// Type aliases for TUI goals  
-use crate::tui::autonomous_data_types::{
-    GoalType as AutonomousGoalType,
-    Priority as AutonomousPriority,
-    GoalStatus as AutonomousGoalStatus,
-};
 
 /// System connection status
 #[derive(Debug, Clone, PartialEq)]

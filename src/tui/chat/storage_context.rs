@@ -186,6 +186,11 @@ impl ChatStorageContext {
         self.storage_bridge.search_chat_history(query, limit).await
     }
     
+    /// Get messages for a conversation
+    pub async fn get_conversation_messages(&self, conversation_id: &str) -> Result<Vec<crate::storage::chat_history::ChatMessage>> {
+        self.storage_bridge.get_conversation_messages(conversation_id).await
+    }
+    
     /// Switch to a different conversation
     pub async fn switch_conversation(&self, conversation_id: String) -> Result<()> {
         let mut current = self.current_conversation_id.write().await;

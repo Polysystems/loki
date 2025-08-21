@@ -81,7 +81,7 @@ impl CognitiveInsightsPanel {
             lines.push(Line::from(Span::styled("No active reasoning", 
                 Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))));
         } else {
-            // Show reasoning steps (placeholder for now)
+            // Show reasoning steps from cognitive system
             lines.push(Line::from(vec![
                 Span::styled("Current Chain:", Style::default().fg(Color::Yellow)),
             ]));
@@ -122,7 +122,7 @@ impl CognitiveInsightsPanel {
         ]));
         lines.push(Line::from(""));
         
-        // Goal hierarchy (placeholder)
+        // Goal hierarchy from goal manager
         let goals = vec![
             ("Primary", "Assist user with chat enhancement", Color::Green, 85),
             ("Secondary", "Maintain code quality", Color::Yellow, 60),

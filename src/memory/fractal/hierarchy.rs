@@ -3940,7 +3940,7 @@ impl DynamicHierarchyManager {
             confidence: 0.9,
         };
 
-        let mut adaptation_metrics = HashMap::new();
+        let adaptation_metrics = HashMap::new();
 
         let adaptation_analytics = AdaptationAnalytics {
             analytics_id: "adaptation_analysis".to_string(),
@@ -5610,7 +5610,6 @@ impl DynamicHierarchyManager {
 
     /// Convert score history to PerformanceMetrics for trend analysis
     fn convert_score_history_to_metrics(&self, perf_data: &NodePerformanceData) -> Vec<PerformanceMetrics> {
-        use chrono::Utc;
         
         perf_data.score_history
             .iter()

@@ -4,7 +4,7 @@
 //! communication between tabs, models, agents, tools, and orchestration.
 
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 use std::collections::HashMap;
 use serde_json::Value;
 use anyhow::Result;
@@ -15,7 +15,7 @@ use crate::tui::{
     shared_state::SharedSystemState,
     tab_registry::TabRegistry,
     chat::{
-        models::{catalog::ModelCatalog, discovery::ModelDiscoveryEngine, benchmark::BenchmarkSuite},
+        models::{catalog::ModelCatalog, discovery::ModelDiscoveryEngine},
         agents::AgentCreationWizard,
         tools::IntegratedToolSystem,
         editor::IntegratedEditor,
@@ -131,7 +131,7 @@ impl IntegrationHub {
             use crate::tui::nlp::core::processor::NaturalLanguageProcessor;
             use crate::tui::chat::core::commands::CommandRegistry;
             
-            let tool_manager = Arc::new(IntelligentToolManager::placeholder());
+            let tool_manager = Arc::new(IntelligentToolManager::new());
             let nlp = Arc::new(NaturalLanguageProcessor::new(
                 CommandRegistry::new(),
                 None, // No tool executor yet
@@ -144,6 +144,16 @@ impl IntegrationHub {
         let orchestrator = Arc::new(
             UnifiedOrchestrator::new(Default::default()).await?
         );
+        
+        // Wire orchestrator with model providers if API config is available
+        if let Ok(api_config) = crate::config::ApiKeysConfig::from_env() {
+            let providers = crate::models::providers::ProviderFactory::create_providers(&api_config);
+            if !providers.is_empty() {
+                let provider_count = providers.len();
+                orchestrator.initialize_with_providers(providers).await?;
+                tracing::info!("Initialized orchestrator with {} model providers", provider_count);
+            }
+        }
         
         let hub = Self {
             event_bus: event_bus.clone(),
@@ -437,6 +447,69 @@ impl IntegrationHub {
         Ok(())
     }
     
+    /// Broadcast event to all subscribers
+    pub async fn broadcast_event(&self, event: SystemEvent) {
+        self.event_bus.publish(event).await;
+    }
+    
+    /// Get agent system for direct access
+    pub fn get_agent_system(&self) -> Arc<AgentCreationWizard> {
+        self.agent_system.clone()
+    }
+    
+    /// Get tool hub for direct access
+    pub fn get_tool_hub(&self) -> Arc<IntegratedToolSystem> {
+        self.tool_hub.clone()
+    }
+    
+    /// Get code editor for direct access
+    pub fn get_code_editor(&self) -> Arc<IntegratedEditor> {
+        self.code_editor.clone()
+    }
+    
+    /// Get orchestrator for direct access
+    pub fn get_orchestrator(&self) -> Arc<UnifiedOrchestrator> {
+        self.orchestrator.clone()
+    }
+    
+    /// Process a request through the appropriate component
+    pub async fn process_request(&self, request_type: &str, data: Value) -> Result<Value> {
+        // Update status to track activity
+        {
+            let mut status = self.status.write().await;
+            status.message_count += 1;
+            status.last_activity = chrono::Utc::now();
+        }
+        
+        match request_type {
+            "agent" => {
+                // Process through agent system
+                // For now, just return the data as agent system doesn't have process_request yet
+                debug!("Processing agent request through agent system");
+                Ok(data)
+            },
+            "tool" => {
+                // Process through tool hub
+                // For now, just return the data as tool hub doesn't have process_request yet
+                debug!("Processing tool request through tool hub");
+                Ok(data)
+            },
+            "code" => {
+                // Process through code editor
+                // For now, just return the data as code editor doesn't have process_request yet
+                debug!("Processing code request through code editor");
+                Ok(data)
+            },
+            "orchestration" => {
+                // Process through orchestrator
+                // For now, just return the data as orchestrator doesn't have process method yet
+                debug!("Processing orchestration request");
+                Ok(data)
+            },
+            _ => Err(anyhow::anyhow!("Unknown request type: {}", request_type))
+        }
+    }
+    
     /// Send cross-tab message
     pub async fn send_cross_tab_message(
         &self,
@@ -558,7 +631,13 @@ impl EventHandler for AgentCreationHandler {
     async fn handle(&self, event: &SystemEvent, _context: &IntegrationContext) -> Result<()> {
         if let SystemEvent::AgentCreated { agent_id, config, .. } = event {
             debug!("Handling agent creation: {}", agent_id);
-            // Process agent creation
+            
+            // Use the agent_system to configure the new agent
+            if let Ok(agent_config) = serde_json::from_value::<crate::tui::chat::agents::AgentConfig>(config.clone()) {
+                // Register agent with the creation wizard
+                self.agent_system.register_agent(agent_id.clone(), agent_config).await;
+                info!("Agent {} registered with creation wizard", agent_id);
+            }
         }
         Ok(())
     }
@@ -583,7 +662,13 @@ impl EventHandler for ToolExecutionHandler {
     async fn handle(&self, event: &SystemEvent, _context: &IntegrationContext) -> Result<()> {
         if let SystemEvent::ToolExecuted { tool_id, params, result, .. } = event {
             debug!("Handling tool execution: {}", tool_id);
-            // Process tool execution result
+            
+            // Use the tool_hub to process execution results
+            if let Err(e) = self.tool_hub.record_execution_result(tool_id, params.clone(), result.clone()).await {
+                warn!("Failed to record tool execution result: {}", e);
+            } else {
+                debug!("Tool execution result recorded for {}", tool_id);
+            }
         }
         Ok(())
     }
@@ -608,7 +693,16 @@ impl EventHandler for CodeEditingHandler {
     async fn handle(&self, event: &SystemEvent, _context: &IntegrationContext) -> Result<()> {
         if let SystemEvent::CodeEdited { file, changes } = event {
             debug!("Handling code edit: {}", file);
-            // Process code changes
+            
+            // Use the code_editor to apply changes
+            if let Ok(changes_list) = serde_json::from_value::<Vec<String>>(changes.clone()) {
+                // Apply changes through the integrated editor
+                if let Err(e) = self.code_editor.apply_changes(file.clone(), changes_list).await {
+                    warn!("Failed to apply code changes: {}", e);
+                } else {
+                    info!("Code changes applied to {}", file);
+                }
+            }
         }
         Ok(())
     }
@@ -630,10 +724,27 @@ impl OrchestrationHandler {
 
 #[async_trait::async_trait]
 impl EventHandler for OrchestrationHandler {
-    async fn handle(&self, event: &SystemEvent, _context: &IntegrationContext) -> Result<()> {
+    async fn handle(&self, event: &SystemEvent, context: &IntegrationContext) -> Result<()> {
         if let SystemEvent::OrchestrationRequested { request_id, config } = event {
             debug!("Handling orchestration request: {}", request_id);
-            // Process orchestration request
+            
+            // Use the orchestrator to process the request
+            if let Ok(orch_request) = serde_json::from_value::<crate::tui::chat::orchestration::OrchestrationRequest>(config.clone()) {
+                // Process through unified orchestrator
+                match self.orchestrator.process(orch_request).await {
+                    Ok(response) => {
+                        info!("Orchestration request {} processed successfully", request_id);
+                        // Broadcast response
+                        context.hub.broadcast_event(SystemEvent::OrchestrationCompleted {
+                            request_id: request_id.clone(),
+                            result: serde_json::to_value(response)?,
+                        }).await;
+                    },
+                    Err(e) => {
+                        warn!("Failed to process orchestration request {}: {}", request_id, e);
+                    }
+                }
+            }
         }
         Ok(())
     }

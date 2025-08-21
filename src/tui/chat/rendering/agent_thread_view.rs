@@ -52,6 +52,44 @@ impl AgentThreadView {
         }
     }
     
+    /// Calculate progress based on agent status and task info
+    fn calculate_progress(&self, agent: &super::render_state::AgentInfo) -> u16 {
+        // Dynamic progress calculation based on agent status
+        match agent.status.as_str() {
+            "Idle" => 0,
+            "Starting" => 10,
+            "Active" | "Working" => {
+                // For active agents, estimate progress based on time or messages
+                // In a real implementation, this would track actual task progress
+                let render_state = get_current_render_state();
+                
+                // Base progress on message count (simple heuristic)
+                let msg_count = render_state.messages.recent.len();
+                let progress = match msg_count {
+                    0..=2 => 20,
+                    3..=5 => 40,
+                    6..=10 => 60,
+                    11..=15 => 80,
+                    _ => 90,
+                };
+                
+                // If streaming, add some progress
+                if let Some(last_msg) = render_state.messages.recent.last() {
+                    if last_msg.is_streaming {
+                        std::cmp::min(progress + 5, 95)
+                    } else {
+                        progress
+                    }
+                } else {
+                    progress
+                }
+            },
+            "Completed" => 100,
+            "Failed" => 0,
+            _ => 50, // Unknown status
+        }
+    }
+    
     /// Render the complete agent thread view
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let render_state = get_current_render_state();
@@ -208,36 +246,96 @@ impl AgentThreadView {
     
     /// Render the conversation messages
     fn render_conversation(&self, f: &mut Frame, area: Rect, agent: &super::render_state::AgentInfo) {
+        let render_state = get_current_render_state();
         let mut lines = Vec::new();
         
         // Show current task if any
-        if agent.status == "Working" {
+        if agent.status == "Working" || agent.status == "Active" {
             lines.push(Line::from(vec![
                 Span::styled("🔄 ", Style::default().fg(Color::Yellow)),
                 Span::styled("Current Task: ", Style::default().fg(Color::DarkGray)),
-                Span::raw("Processing request..."),
+                Span::raw(format!("Processing with {} agent...", agent.name)),
             ]));
             lines.push(Line::from(""));
         }
         
-        // Placeholder conversation (in real implementation, would show actual messages)
-        lines.push(Line::from(vec![
-            Span::styled("User: ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("Analyze this code for improvements"),
-        ]));
-        lines.push(Line::from(""));
-        
-        lines.push(Line::from(vec![
-            Span::styled(format!("{}: ", agent.name), 
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("I'll analyze the code for potential improvements..."),
-        ]));
-        lines.push(Line::from(""));
-        
-        if agent.status == "Active" {
+        // Show actual messages from the chat if available
+        if !render_state.messages.recent.is_empty() {
+            // Display recent messages (limit to last 10 for performance)
+            let message_count = render_state.messages.recent.len();
+            let start_idx = if message_count > 10 { message_count - 10 } else { 0 };
+            
+            for msg in &render_state.messages.recent[start_idx..] {
+                let (prefix, style) = match msg.role.as_str() {
+                    "user" => ("User: ".to_string(), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    "assistant" => (format!("{}: ", agent.name), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    "system" => ("System: ".to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC)),
+                    _ => ("Unknown: ".to_string(), Style::default().fg(Color::DarkGray)),
+                };
+                
+                // Split long messages into multiple lines
+                let content_lines: Vec<&str> = msg.content.lines().collect();
+                if !content_lines.is_empty() {
+                    // First line with role prefix
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, style),
+                        Span::raw(content_lines[0]),
+                    ]));
+                    
+                    // Subsequent lines with indentation
+                    for line in &content_lines[1..] {
+                        lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::raw(*line),
+                        ]));
+                    }
+                }
+                
+                // Add timestamp if enabled
+                if render_state.messages.show_timestamps {
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            format!("[{}]", msg.timestamp.format("%H:%M:%S")),
+                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)
+                        ),
+                    ]));
+                }
+                
+                lines.push(Line::from(""));
+            }
+            
+            // Show if a message is currently streaming
+            if let Some(last_msg) = render_state.messages.recent.last() {
+                if last_msg.is_streaming {
+                    lines.push(Line::from(vec![
+                        Span::styled("⏳ ", Style::default().fg(Color::Yellow)),
+                        Span::styled("Streaming response...", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+                    ]));
+                }
+            }
+        } else {
+            // Fallback to showing agent is ready
             lines.push(Line::from(vec![
-                Span::styled("⏳ ", Style::default().fg(Color::Yellow)),
-                Span::styled("Processing...", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+                Span::styled("💬 ", Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{} is ready to assist", agent.name), 
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("No messages yet. Start a conversation!", 
+                    Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        
+        // Show active status
+        if agent.status == "Active" && !lines.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("⚡ ", Style::default().fg(Color::Green)),
+                Span::styled("Agent is actively processing...", 
+                    Style::default().fg(Color::Green).add_modifier(Modifier::ITALIC)),
             ]));
         }
         
@@ -259,7 +357,7 @@ impl AgentThreadView {
                     .borders(Borders::ALL)
                     .title(" Progress "))
                 .gauge_style(Style::default().fg(Color::Green))
-                .percent(65) // Placeholder progress
+                .percent(self.calculate_progress(agent))
                 .label("Processing...");
                 
             f.render_widget(progress, area);

@@ -48,6 +48,19 @@ pub struct CodeAgent {
     enable_filesystem: bool,
 }
 
+/// Agent requirement types for spawning specialized agents
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentRequirement {
+    Frontend,
+    Backend,
+    DataProcessing,
+    Testing,
+    DevOps,
+    Database,
+    Mobile,
+    General,
+}
+
 /// Code specialization types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CodeSpecialization {
@@ -474,6 +487,7 @@ impl CodeAgent {
                     prefer_local: false,
                     require_streaming: false,
                     required_capabilities: vec!["code_generation".to_string()],
+                    task_hint: Some("code_generation".to_string()),
                     creativity_level: Some(0.7),
                     formality_level: Some(0.8),
                     target_audience: Some("developers".to_string()),
@@ -666,7 +680,7 @@ class {}:
     def execute(self):
         """Main functionality."""
         # Implementation goes here
-        raise NotImplementedError("Implement {}")
+        raise NotImplementedError(f"Implement {name}")
 
 if __name__ == "__main__":
     instance = {}()
@@ -674,8 +688,7 @@ if __name__ == "__main__":
 "#, name, description,
     name.replace(" ", ""),
     name.replace(" ", ""),
-    name,
-    name.replace(" ", ""))
+    name)
     }
     
     /// Generate JavaScript template
@@ -974,9 +987,59 @@ impl CodeAgentFactory {
         let specialization = Self::determine_specialization(requirements);
         let name = Self::generate_agent_name(&specialization);
         
-        let mut agent = CodeAgent::new(name, specialization, update_tx);
+        let agent = CodeAgent::new(name, specialization, update_tx);
         // Model orchestrator should be set after creation if available
         agent
+    }
+    
+    /// Create a specialized agent for a specific requirement type
+    pub fn create_specialized_agent(
+        req_type: AgentRequirement,
+        update_tx: mpsc::Sender<AgentUpdate>,
+    ) -> CodeAgent {
+        let specialization = match req_type {
+            AgentRequirement::Frontend => CodeSpecialization::Frontend {
+                frameworks: vec!["React".to_string(), "TypeScript".to_string(), "Next.js".to_string()],
+                ui_libraries: vec!["Material-UI".to_string(), "Tailwind CSS".to_string()],
+                build_tools: vec!["Webpack".to_string(), "Vite".to_string()],
+            },
+            AgentRequirement::Backend => CodeSpecialization::Backend {
+                languages: vec!["Rust".to_string(), "Node.js".to_string()],
+                databases: vec!["PostgreSQL".to_string(), "MongoDB".to_string()],
+                apis: vec!["REST".to_string(), "GraphQL".to_string(), "WebSocket".to_string()],
+            },
+            AgentRequirement::DataProcessing => CodeSpecialization::Backend {
+                languages: vec!["Python".to_string()],
+                databases: vec!["Redis".to_string(), "Kafka".to_string()],
+                apis: vec!["Streaming".to_string(), "JSON-RPC".to_string()],
+            },
+            AgentRequirement::Testing => CodeSpecialization::Testing {
+                test_frameworks: vec!["Jest".to_string(), "Pytest".to_string(), "Cargo test".to_string()],
+                coverage_tools: vec!["Coverage.py".to_string(), "NYC".to_string()],
+            },
+            AgentRequirement::DevOps => CodeSpecialization::DevOps {
+                ci_cd_tools: vec!["GitHub Actions".to_string(), "Jenkins".to_string()],
+                cloud_platforms: vec!["AWS".to_string(), "GCP".to_string()],
+                iac_tools: vec!["Terraform".to_string(), "Docker".to_string()],
+            },
+            AgentRequirement::Database => CodeSpecialization::Backend {
+                languages: vec!["SQL".to_string()],
+                databases: vec!["PostgreSQL".to_string(), "MySQL".to_string(), "MongoDB".to_string()],
+                apis: vec!["Database API".to_string()],
+            },
+            AgentRequirement::Mobile => CodeSpecialization::Frontend {
+                frameworks: vec!["React Native".to_string(), "Flutter".to_string()],
+                ui_libraries: vec!["Native Base".to_string()],
+                build_tools: vec!["Metro".to_string(), "Expo".to_string()],
+            },
+            AgentRequirement::General => CodeSpecialization::General {
+                languages: vec!["Rust".to_string(), "Python".to_string(), "JavaScript".to_string()],
+                frameworks: vec![],
+            },
+        };
+        
+        let name = Self::generate_agent_name(&specialization);
+        CodeAgent::new(name, specialization, update_tx)
     }
     
     fn determine_specialization(requirements: &str) -> CodeSpecialization {

@@ -6,6 +6,12 @@
 pub mod core;
 pub mod integrations;
 
+// Error handling
+pub mod error;
+
+// Utilities
+pub mod utils;
+
 // New modular structure
 pub mod state;
 pub mod orchestration;
@@ -47,6 +53,9 @@ pub mod editor;
 
 // Storage context integration
 pub mod storage_context;
+
+// Monitoring and analytics
+pub mod monitoring;
 
 // Tests
 // #[cfg(test)]
@@ -217,6 +226,9 @@ pub struct ModularChat {
     pub command_input: String,
     pub settings_manager: std::sync::Arc<tokio::sync::RwLock<SettingsManager>>,
     
+    // Bridge references for later wiring
+    tool_bridge: Option<std::sync::Arc<crate::tui::bridges::tool_bridge::ToolBridge>>,
+    
     // Editor state
     pub editor_active: bool,
     pub current_file: Option<String>,
@@ -237,15 +249,223 @@ pub struct ModularChat {
     pub bridges: Option<std::sync::Arc<crate::tui::bridges::UnifiedBridge>>,
 }
 
+// Simple provider implementations for model discovery
+struct SimpleOpenAIProvider {
+    api_key: Option<String>,
+}
+
+struct SimpleAnthropicProvider {
+    api_key: Option<String>,
+}
+
+struct SimpleOllamaProvider;
+
+// Implement the main ModelProvider trait from crate::models::providers
+#[async_trait::async_trait]
+impl crate::models::providers::ModelProvider for SimpleOpenAIProvider {
+    fn name(&self) -> &str {
+        "OpenAI"
+    }
+    
+    fn is_available(&self) -> bool {
+        self.api_key.is_some()
+    }
+    
+    async fn list_models(&self) -> anyhow::Result<Vec<crate::models::providers::ModelInfo>> {
+        use crate::models::providers::ModelInfo;
+        
+        Ok(vec![
+            ModelInfo {
+                id: "gpt-4-turbo".to_string(),
+                name: "GPT-4 Turbo".to_string(),
+                description: "Most capable GPT-4 model".to_string(),
+                context_length: 128000,
+                capabilities: vec!["chat".to_string(), "code".to_string(), "analysis".to_string()],
+            },
+            ModelInfo {
+                id: "gpt-3.5-turbo".to_string(),
+                name: "GPT-3.5 Turbo".to_string(),
+                description: "Fast and cost-effective model".to_string(),
+                context_length: 16384,
+                capabilities: vec!["chat".to_string(), "code".to_string()],
+            },
+        ])
+    }
+    
+    async fn complete(&self, request: crate::models::providers::CompletionRequest) -> anyhow::Result<crate::models::providers::CompletionResponse> {
+        // Simple placeholder implementation
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+    
+    async fn stream_complete(
+        &self,
+        request: crate::models::providers::CompletionRequest,
+    ) -> anyhow::Result<Box<dyn tokio_stream::Stream<Item = anyhow::Result<crate::models::providers::CompletionChunk>> + Send + Unpin>> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+    
+    async fn embed(&self, texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+    
+    fn get_api_key(&self) -> Option<String> {
+        self.api_key.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::models::providers::ModelProvider for SimpleAnthropicProvider {
+    fn name(&self) -> &str {
+        "Anthropic"
+    }
+    
+    fn is_available(&self) -> bool {
+        self.api_key.is_some()
+    }
+    
+    async fn list_models(&self) -> anyhow::Result<Vec<crate::models::providers::ModelInfo>> {
+        use crate::models::providers::ModelInfo;
+        
+        Ok(vec![
+            ModelInfo {
+                id: "claude-3-opus".to_string(),
+                name: "Claude 3 Opus".to_string(),
+                description: "Most capable Claude model".to_string(),
+                context_length: 200000,
+                capabilities: vec!["chat".to_string(), "code".to_string(), "analysis".to_string()],
+            },
+            ModelInfo {
+                id: "claude-3-sonnet".to_string(),
+                name: "Claude 3 Sonnet".to_string(),
+                description: "Balanced performance and cost".to_string(),
+                context_length: 200000,
+                capabilities: vec!["chat".to_string(), "code".to_string()],
+            },
+        ])
+    }
+    
+    async fn complete(&self, request: crate::models::providers::CompletionRequest) -> anyhow::Result<crate::models::providers::CompletionResponse> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+    
+    async fn stream_complete(
+        &self,
+        request: crate::models::providers::CompletionRequest,
+    ) -> anyhow::Result<Box<dyn tokio_stream::Stream<Item = anyhow::Result<crate::models::providers::CompletionChunk>> + Send + Unpin>> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+    
+    async fn embed(&self, texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+    
+    fn get_api_key(&self) -> Option<String> {
+        self.api_key.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::models::providers::ModelProvider for SimpleOllamaProvider {
+    fn name(&self) -> &str {
+        "Ollama"
+    }
+    
+    fn is_available(&self) -> bool {
+        // Ollama is available if the binary exists
+        true
+    }
+    
+    async fn list_models(&self) -> anyhow::Result<Vec<crate::models::providers::ModelInfo>> {
+        use crate::models::providers::ModelInfo;
+        
+        let mut models = Vec::new();
+        
+        // Try to get actual Ollama models
+        if let Ok(output) = tokio::process::Command::new("ollama")
+            .arg("list")
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                for line in output_str.lines().skip(1) {
+                    if let Some(model_name) = line.split_whitespace().next() {
+                        if !model_name.is_empty() {
+                            models.push(ModelInfo {
+                                id: model_name.to_string(),
+                                name: model_name.to_string(),
+                                description: format!("Local Ollama model: {}", model_name),
+                                context_length: 4096,
+                                capabilities: vec!["chat".to_string(), "code".to_string()],
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If no models found, return empty list (discovery engine will handle it)
+        Ok(models)
+    }
+    
+    async fn complete(&self, request: crate::models::providers::CompletionRequest) -> anyhow::Result<crate::models::providers::CompletionResponse> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+    
+    async fn stream_complete(
+        &self,
+        request: crate::models::providers::CompletionRequest,
+    ) -> anyhow::Result<Box<dyn tokio_stream::Stream<Item = anyhow::Result<crate::models::providers::CompletionChunk>> + Send + Unpin>> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+    
+    async fn embed(&self, texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
+        Err(anyhow::anyhow!("Not implemented"))
+    }
+}
+
 impl ModularChat {
     /// Initialize model discovery engine with available providers
     async fn initialize_model_discovery() -> Option<std::sync::Arc<models::discovery::ModelDiscoveryEngine>> {
-        // For now, return None as we need proper provider implementations
-        // The discovery engine is ready but needs provider instances
-        // TODO: Wire up actual providers when they're available in the models module
+        use models::discovery::ModelDiscoveryEngine;
+        use std::sync::Arc;
         
-        tracing::info!("Model discovery engine initialization deferred - providers not yet available");
-        None
+        let mut providers: Vec<Arc<dyn crate::models::providers::ModelProvider>> = Vec::new();
+        
+        // Add OpenAI provider if API key is available
+        if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
+            providers.push(Arc::new(SimpleOpenAIProvider {
+                api_key: Some(api_key),
+            }));
+            tracing::info!("Added OpenAI provider to discovery engine");
+        }
+        
+        // Add Anthropic provider if API key is available
+        if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
+            providers.push(Arc::new(SimpleAnthropicProvider {
+                api_key: Some(api_key),
+            }));
+            tracing::info!("Added Anthropic provider to discovery engine");
+        }
+        
+        // Add local/Ollama provider (always available)
+        providers.push(Arc::new(SimpleOllamaProvider {}));
+        tracing::info!("Added Ollama provider to discovery engine");
+        
+        // Create the discovery engine with providers
+        let engine = ModelDiscoveryEngine::new(providers);
+        
+        // Start discovery
+        match engine.discover_all().await {
+            Ok(_) => {
+                tracing::info!("Model discovery completed");
+                Some(Arc::new(engine))
+            }
+            Err(e) => {
+                tracing::warn!("Model discovery failed: {}", e);
+                None
+            }
+        }
     }
     
     /// Create a new modular chat system
@@ -259,6 +479,23 @@ impl ModularChat {
         cognitive_system: Option<std::sync::Arc<crate::cognitive::CognitiveSystem>>,
         tool_manager: Option<std::sync::Arc<crate::tools::IntelligentToolManager>>,
         task_manager: Option<std::sync::Arc<crate::tools::task_management::TaskManager>>,
+    ) -> Self {
+        Self::new_with_full_support(
+            model_orchestrator,
+            cognitive_system,
+            tool_manager,
+            task_manager,
+            None,
+        ).await
+    }
+    
+    /// Create a new modular chat system with full support including task registry
+    pub async fn new_with_full_support(
+        model_orchestrator: Option<std::sync::Arc<crate::models::ModelOrchestrator>>,
+        cognitive_system: Option<std::sync::Arc<crate::cognitive::CognitiveSystem>>,
+        tool_manager: Option<std::sync::Arc<crate::tools::IntelligentToolManager>>,
+        task_manager: Option<std::sync::Arc<crate::tools::task_management::TaskManager>>,
+        config: Option<crate::config::Config>,
     ) -> Self {
         use std::sync::Arc;
         use tokio::sync::RwLock;
@@ -470,8 +707,84 @@ impl ModularChat {
             }
         }).collect();
         
-        // Create subtab manager with discovery engines and orchestrator
-        let mut subtab_manager = SubtabManager::new_with_discovery(
+        // Create task registry and context if model orchestrator is available
+        let (task_registry, task_context) = if let Some(ref model_orch) = model_orchestrator {
+            use crate::tasks::{TaskRegistry, TaskContext};
+            use crate::models::ModelManager;
+            use crate::config::Config;
+            
+            // Create task registry
+            let registry = Arc::new(TaskRegistry::new());
+            
+            // Create config (use provided or default)
+            let cfg = config.unwrap_or_else(|| Config::default());
+            
+            // Create model manager
+            let model_manager = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    match ModelManager::with_orchestration(cfg.clone()).await {
+                        Ok(mgr) => {
+                            Some(Arc::new(mgr))
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to create ModelManager for tasks: {}", e);
+                            // Try to create a basic ModelManager
+                            match ModelManager::new(cfg.clone()).await {
+                                Ok(mgr) => Some(Arc::new(mgr)),
+                                Err(_) => {
+                                    // If all fails, we can't provide task support
+                                    tracing::error!("Failed to create ModelManager - task support will be limited");
+                                    None
+                                }
+                            }
+                        }
+                    }
+                })
+            });
+            
+            // Create task context only if we have a model manager
+            if let Some(mgr) = model_manager {
+                let context = TaskContext {
+                    config: cfg,
+                    model_manager: mgr,
+                };
+                
+                tracing::info!("🤖 Task support initialized for CLI tab");
+                (Some(registry), Some(context))
+            } else {
+                tracing::warn!("⚠️ Task support unavailable - ModelManager creation failed");
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+        
+        // Create OllamaManager if Ollama is available
+        let ollama_manager = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                use crate::ollama::OllamaManager;
+                use std::path::PathBuf;
+                
+                let models_dir = dirs::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+                    .join("loki")
+                    .join("models");
+                
+                match OllamaManager::new(models_dir) {
+                    Ok(manager) => {
+                        tracing::info!("✅ Ollama manager initialized");
+                        Some(Arc::new(manager))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to initialize Ollama manager: {}", e);
+                        None
+                    }
+                }
+            })
+        });
+        
+        // Create subtab manager with discovery engines, orchestrator, and task support
+        let mut subtab_manager = SubtabManager::new_with_full_support(
             chat_state.clone(),
             orchestration.clone(),
             agent_manager.clone(),
@@ -479,6 +792,10 @@ impl ModularChat {
             active_models,
             model_discovery.clone(),
             agent_wizard.clone(),
+            task_registry,
+            task_context,
+            model_orchestrator.clone(),
+            ollama_manager,
         );
         
         // Connect the orchestrator to the message processor if available
@@ -592,6 +909,7 @@ impl ModularChat {
             session_cost: None,
             event_bus: None,
             bridges: None,
+            tool_bridge: None,
         }
     }
     
@@ -629,6 +947,39 @@ impl ModularChat {
             });
         }
         
+        // Connect storage bridge for persistence
+        // Create storage context and connect it to the chat manager
+        let storage_context = std::sync::Arc::new(
+            crate::tui::chat::storage_context::ChatStorageContext::new(
+                bridges.storage_bridge.clone()
+            )
+        );
+        
+        // Initialize storage context asynchronously
+        let storage_context_clone = storage_context.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                if let Err(e) = storage_context_clone.initialize().await {
+                    tracing::warn!("Failed to initialize storage context: {}", e);
+                } else {
+                    tracing::info!("✅ Storage context initialized");
+                }
+            })
+        });
+        
+        // Connect storage context to message processor for persistence
+        if let Some(ref mut processor) = self.subtab_manager.borrow_mut().message_processor {
+            processor.set_storage_context(storage_context.clone());
+            tracing::info!("✅ Storage context connected to message processor - chat persistence enabled");
+        }
+        
+        // Connect tool bridge to tool manager if available
+        // This needs to be done after tool manager is initialized via initialize_orchestration
+        self.tool_bridge = Some(bridges.tool_bridge.clone());
+        tracing::info!("✅ Tool bridge stored for later connection to tool manager");
+        
+        tracing::info!("✅ Bridges connected to ModularChat - tool bridge available for tool components");
+        
         tracing::info!("Bridges connected to ModularChat");
     }
     
@@ -639,14 +990,33 @@ impl ModularChat {
         model_orchestrator: std::sync::Arc<crate::models::ModelOrchestrator>,
         tool_manager: std::sync::Arc<crate::tools::IntelligentToolManager>,
     ) -> anyhow::Result<()> {
+        // Connect tool bridge to tool manager if available
+        if let Some(ref tool_bridge) = self.tool_bridge {
+            tool_bridge.set_tool_manager(tool_manager.clone()).await;
+            tracing::info!("✅ Tool manager connected to tool bridge - enabling cross-tab tool execution");
+        }
         // Initialize the orchestration system
         let orchestration_manager = self.orchestration.clone();
         let mut orch = orchestration_manager.write().await;
         
+        // Connect to ModelOrchestrator to sync available models
+        orch.connect_to_orchestrator(model_orchestrator.clone()).await?;
+        
         // Use the already discovered models instead of hardcoded ones
         // The available_models list was already populated with actual models
         if !self.available_models.is_empty() && self.available_models[0] != "no-models-available" {
-            orch.enabled_models = self.available_models.clone();
+            // Models are already synced via connect_to_orchestrator
+            tracing::info!("Orchestration initialized with {} models", orch.enabled_models.len());
+        }
+        
+        // Initialize agent pool if agent system is enabled
+        if self.agent_manager.read().await.agent_system_enabled {
+            let mut agent_mgr = self.agent_manager.write().await;
+            if let Err(e) = agent_mgr.initialize_agent_pool().await {
+                tracing::warn!("Failed to initialize agent pool: {}", e);
+            } else {
+                tracing::info!("Agent pool connected to orchestration system");
+            }
         }
         
         Ok(())

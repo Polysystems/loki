@@ -73,6 +73,7 @@ pub struct ChatState {
     // UI state fields
     pub active_chat: usize,
     pub show_timestamps: bool,
+    pub show_context_panel: bool,
 }
 
 /// Tool execution record for chat state
@@ -113,6 +114,7 @@ impl ChatState {
             tool_executions: Vec::new(),
             active_chat: id,
             show_timestamps: false,
+            show_context_panel: false,
         }
     }
     

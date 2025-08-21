@@ -34,6 +34,7 @@ pub struct NlpIntent {
     pub confidence: f32,
     pub args: Vec<String>,
     pub original_input: String,
+    pub suggestions: Vec<String>,
 }
 
 /// Handles natural language command processing
@@ -55,43 +56,79 @@ pub struct NaturalLanguageHandler {
     
     /// Maximum context size
     max_context_size: usize,
+    
+    /// Tool executor for getting tool suggestions
+    tool_executor: Option<Arc<crate::tui::chat::core::tool_executor::ChatToolExecutor>>,
+}
+
+impl NlpIntent {
+    /// Create a new NlpIntent with empty suggestions
+    pub fn new(command: NlpCommand, confidence: f32, args: Vec<String>, original_input: String) -> Self {
+        Self {
+            command,
+            confidence,
+            args,
+            original_input,
+            suggestions: Vec::new(),
+        }
+    }
+    
+    /// Create a new NlpIntent with suggestions
+    pub fn with_suggestions(command: NlpCommand, confidence: f32, args: Vec<String>, original_input: String, suggestions: Vec<String>) -> Self {
+        Self {
+            command,
+            confidence,
+            args,
+            original_input,
+            suggestions,
+        }
+    }
 }
 
 impl NaturalLanguageHandler {
     /// Create a new natural language handler
-    pub fn new(nlp_orchestrator: Arc<NaturalLanguageOrchestrator>) -> Self {
-        let patterns = Self::build_patterns();
+    pub fn new(nlp_orchestrator: Arc<NaturalLanguageOrchestrator>) -> Result<Self> {
+        let patterns = Self::build_patterns()
+            .context("Failed to build NLP command patterns")?;
         
-        Self {
+        Ok(Self {
             nlp_orchestrator,
             patterns,
             chat_state: None,
             nlp_integration: None,
             context_window: Vec::new(),
             max_context_size: 10,
-        }
+            tool_executor: None,
+        })
     }
     
     /// Create with chat state reference
     pub fn with_chat_state(
         nlp_orchestrator: Arc<NaturalLanguageOrchestrator>,
         chat_state: Arc<RwLock<ChatState>>,
-    ) -> Self {
-        let patterns = Self::build_patterns();
+    ) -> Result<Self> {
+        let patterns = Self::build_patterns()
+            .context("Failed to build NLP command patterns")?;
         
-        Self {
+        Ok(Self {
             nlp_orchestrator,
             patterns,
             chat_state: Some(chat_state),
             nlp_integration: None,
             context_window: Vec::new(),
             max_context_size: 10,
-        }
+            tool_executor: None,
+        })
     }
     
     /// Set NLP integration for enhanced processing
     pub fn set_nlp_integration(&mut self, integration: Arc<NlpIntegration>) {
         self.nlp_integration = Some(integration);
+    }
+    
+    /// Set tool executor for getting tool suggestions
+    pub fn set_tool_executor(&mut self, executor: Arc<crate::tui::chat::core::tool_executor::ChatToolExecutor>) {
+        self.tool_executor = Some(executor);
     }
     
     /// Update context window for multi-turn analysis
@@ -124,24 +161,24 @@ impl NaturalLanguageHandler {
                 .map(|v| v.clone())
                 .collect();
             
-            return Some(NlpIntent {
+            return Some(NlpIntent::new(
                 command,
-                confidence: nlp_result.confidence,
+                nlp_result.confidence,
                 args,
-                original_input: nlp_result.original.clone(),
-            });
+                nlp_result.original.clone(),
+            ));
         }
         
         // Use suggested actions as fallback
         if !nlp_result.suggested_actions.is_empty() {
             let first_action = &nlp_result.suggested_actions[0];
             if first_action.contains("task") {
-                return Some(NlpIntent {
-                    command: NlpCommand::CreateTask,
-                    confidence: nlp_result.confidence * 0.8,
-                    args: vec![nlp_result.processed.clone()],
-                    original_input: nlp_result.original.clone(),
-                });
+                return Some(NlpIntent::new(
+                    NlpCommand::CreateTask,
+                    nlp_result.confidence * 0.8,
+                    vec![nlp_result.processed.clone()],
+                    nlp_result.original.clone(),
+                ));
             }
         }
         
@@ -149,72 +186,85 @@ impl NaturalLanguageHandler {
     }
     
     /// Build command patterns
-    fn build_patterns() -> Vec<(Regex, NlpCommand)> {
-        vec![
+    fn build_patterns() -> Result<Vec<(Regex, NlpCommand)>> {
+        Ok(vec![
             // Task management patterns
             (
-                Regex::new(r"(?i)create (?:a )?task (?:to |for )?(.+)").unwrap(),
+                Regex::new(r"(?i)create (?:a )?task (?:to |for )?(.+)")
+                    .context("Failed to compile create task regex")?,
                 NlpCommand::CreateTask,
             ),
             (
-                Regex::new(r"(?i)(?:show|list) (?:my )?tasks").unwrap(),
+                Regex::new(r"(?i)(?:show|list) (?:my )?tasks")
+                    .context("Failed to compile list tasks regex")?,
                 NlpCommand::ListTasks,
             ),
             (
-                Regex::new(r"(?i)complete task (\d+)").unwrap(),
+                Regex::new(r"(?i)complete task (\d+)")
+                    .context("Failed to compile complete task regex")?,
                 NlpCommand::CompleteTask,
             ),
             
             // Model management patterns
             (
-                Regex::new(r"(?i)(?:switch|change) (?:to )?model (.+)").unwrap(),
+                Regex::new(r"(?i)(?:switch|change) (?:to )?model (.+)")
+                    .context("Failed to compile switch model regex")?,
                 NlpCommand::SwitchModel,
             ),
             (
-                Regex::new(r"(?i)what models? (?:are |is )?available").unwrap(),
+                Regex::new(r"(?i)what models? (?:are |is )?available")
+                    .context("Failed to compile list models regex")?,
                 NlpCommand::ListModels,
             ),
             
             // Search patterns
             (
-                Regex::new(r"(?i)search (?:for )?(.+)").unwrap(),
+                Regex::new(r"(?i)search (?:for )?(.+)")
+                    .context("Failed to compile search regex")?,
                 NlpCommand::Search,
             ),
             (
-                Regex::new(r"(?i)find (.+) in (.+)").unwrap(),
+                Regex::new(r"(?i)find (.+) in (.+)")
+                    .context("Failed to compile find in context regex")?,
                 NlpCommand::SearchInContext,
             ),
             
             // Analysis patterns
             (
-                Regex::new(r"(?i)analyze (?:the )?(.+)").unwrap(),
+                Regex::new(r"(?i)analyze (?:the )?(.+)")
+                    .context("Failed to compile analyze regex")?,
                 NlpCommand::Analyze,
             ),
             (
-                Regex::new(r"(?i)explain (?:the )?(.+)").unwrap(),
+                Regex::new(r"(?i)explain (?:the )?(.+)")
+                    .context("Failed to compile explain regex")?,
                 NlpCommand::Explain,
             ),
             
             // Memory patterns
             (
-                Regex::new(r"(?i)remember (?:that )?(.+)").unwrap(),
+                Regex::new(r"(?i)remember (?:that )?(.+)")
+                    .context("Failed to compile remember regex")?,
                 NlpCommand::Remember,
             ),
             (
-                Regex::new(r"(?i)(?:what do you |do you )?recall (?:about )?(.+)").unwrap(),
+                Regex::new(r"(?i)(?:what do you |do you )?recall (?:about )?(.+)")
+                    .context("Failed to compile recall regex")?,
                 NlpCommand::Recall,
             ),
             
             // Tool patterns
             (
-                Regex::new(r"(?i)(?:run|execute) (?:the )?(.+) tool").unwrap(),
+                Regex::new(r"(?i)(?:run|execute) (?:the )?(.+) tool")
+                    .context("Failed to compile run tool regex")?,
                 NlpCommand::RunTool,
             ),
             (
-                Regex::new(r"(?i)(?:use|invoke) (.+) (?:to|for) (.+)").unwrap(),
+                Regex::new(r"(?i)(?:use|invoke) (.+) (?:to|for) (.+)")
+                    .context("Failed to compile use tool regex")?,
                 NlpCommand::UseToolFor,
             ),
-        ]
+        ])
     }
     
     /// Process a natural language input
@@ -222,11 +272,15 @@ impl NaturalLanguageHandler {
         // Update context window
         self.update_context_window(input);
         
+        // Get tool suggestions for this input
+        let suggestions = self.get_tool_suggestions(input).await;
+        
         // First, try enhanced NLP processing if available
         if let Some(integration) = &self.nlp_integration {
             match integration.process_message(input).await {
                 Ok(nlp_result) => {
-                    if let Some(intent) = self.extract_intent_from_nlp_result(&nlp_result) {
+                    if let Some(mut intent) = self.extract_intent_from_nlp_result(&nlp_result) {
+                        intent.suggestions = suggestions.clone();
                         return Ok(Some(intent));
                     }
                 }
@@ -245,12 +299,13 @@ impl NaturalLanguageHandler {
                     .filter_map(|m| m.map(|m| m.as_str().to_string()))
                     .collect();
                 
-                return Ok(Some(NlpIntent {
-                    command: command.clone(),
-                    confidence: 0.9,
+                return Ok(Some(NlpIntent::with_suggestions(
+                    command.clone(),
+                    0.9,
                     args,
-                    original_input: input.to_string(),
-                }));
+                    input.to_string(),
+                    suggestions,
+                )));
             }
         }
         
@@ -283,30 +338,35 @@ impl NaturalLanguageHandler {
                         confidence: 0.9,
                         args: vec![analysis.to_string()],
                         original_input: analysis.to_string(),
+                        suggestions: vec![],
                     }),
                     "switch_model" | "model" => return Some(NlpIntent {
                         command: NlpCommand::SwitchModel,
                         confidence: 0.9,
                         args: vec![],
                         original_input: analysis.to_string(),
+                        suggestions: vec![],
                     }),
                     "search" | "find" => return Some(NlpIntent {
                         command: NlpCommand::Search,
                         confidence: 0.9,
                         args: vec![analysis.to_string()],
                         original_input: analysis.to_string(),
+                        suggestions: vec![],
                     }),
                     "analyze" => return Some(NlpIntent {
                         command: NlpCommand::Analyze,
                         confidence: 0.9,
                         args: vec![analysis.to_string()],
                         original_input: analysis.to_string(),
+                        suggestions: vec![],
                     }),
                     "remember" | "store" => return Some(NlpIntent {
                         command: NlpCommand::Remember,
                         confidence: 0.9,
                         args: vec![analysis.to_string()],
                         original_input: analysis.to_string(),
+                        suggestions: vec![],
                     }),
                     _ => {}
                 }
@@ -321,6 +381,7 @@ impl NaturalLanguageHandler {
                 confidence: 0.7,
                 args: vec![analysis.to_string()],
                 original_input: analysis.to_string(),
+                suggestions: vec![],
             });
         }
         
@@ -331,6 +392,7 @@ impl NaturalLanguageHandler {
                 confidence: 0.7,
                 args: vec![],
                 original_input: analysis.to_string(),
+                suggestions: vec![],
             });
         }
         
@@ -341,6 +403,7 @@ impl NaturalLanguageHandler {
                 confidence: 0.6,
                 args: vec![analysis.to_string()],
                 original_input: analysis.to_string(),
+                suggestions: vec![],
             });
         }
         
@@ -351,6 +414,7 @@ impl NaturalLanguageHandler {
                 confidence: 0.65,
                 args: vec![analysis.to_string()],
                 original_input: analysis.to_string(),
+                suggestions: vec![],
             });
         }
         
@@ -361,6 +425,7 @@ impl NaturalLanguageHandler {
                 confidence: 0.65,
                 args: vec![analysis.to_string()],
                 original_input: analysis.to_string(),
+                suggestions: vec![],
             });
         }
         
@@ -376,6 +441,7 @@ impl NaturalLanguageHandler {
                 confidence: 0.7,
                 args: vec![analysis.to_string()],
                 original_input: analysis.to_string(),
+                suggestions: vec![],
             });
         }
         
@@ -386,6 +452,7 @@ impl NaturalLanguageHandler {
                 confidence: 0.6,
                 args: vec![analysis.to_string()],
                 original_input: analysis.to_string(),
+                suggestions: vec![],
             });
         }
         
@@ -431,6 +498,68 @@ impl NaturalLanguageHandler {
                 Err(anyhow::anyhow!("Unknown model: {}. Available models: {}", model_name, available))
             }
         }
+    }
+    
+    /// Get tool suggestions based on natural language input
+    pub async fn get_tool_suggestions(&self, input: &str) -> Vec<String> {
+        let mut suggestions = Vec::new();
+        
+        // Get suggestions from ChatToolExecutor if available
+        if let Some(executor) = &self.tool_executor {
+            let tool_suggestions = executor.get_tool_suggestions(input).await;
+            suggestions.extend(tool_suggestions);
+        }
+        
+        // Add command-based suggestions based on NLP patterns
+        let input_lower = input.to_lowercase();
+        
+        // Task-related suggestions
+        if input_lower.contains("task") || input_lower.contains("todo") {
+            suggestions.push("Try: 'create a task to [description]'".to_string());
+            suggestions.push("Try: 'list my tasks'".to_string());
+            suggestions.push("Try: 'complete task [id]'".to_string());
+        }
+        
+        // Model-related suggestions
+        if input_lower.contains("model") || input_lower.contains("switch") {
+            suggestions.push("Try: 'switch to gpt-4'".to_string());
+            suggestions.push("Try: 'list available models'".to_string());
+            suggestions.push("Try: 'use claude for this'".to_string());
+        }
+        
+        // Search-related suggestions
+        if input_lower.contains("find") || input_lower.contains("search") || input_lower.contains("look") {
+            suggestions.push("Try: 'search for [query]'".to_string());
+            suggestions.push("Try: 'find in context [term]'".to_string());
+            suggestions.push("/execute tool=web_search args={\"query\": \"...\"}".to_string());
+        }
+        
+        // Analysis-related suggestions
+        if input_lower.contains("analyze") || input_lower.contains("review") {
+            suggestions.push("Try: 'analyze this code'".to_string());
+            suggestions.push("/workflow code_review params={\"file\": \"...\"}".to_string());
+            suggestions.push("/execute tool=code_analysis args={\"target\": \"...\"}".to_string());
+        }
+        
+        // Memory-related suggestions
+        if input_lower.contains("remember") || input_lower.contains("recall") || input_lower.contains("memory") {
+            suggestions.push("Try: 'remember this: [content]'".to_string());
+            suggestions.push("Try: 'recall information about [topic]'".to_string());
+        }
+        
+        // Tool-related suggestions
+        if input_lower.contains("tool") || input_lower.contains("run") || input_lower.contains("execute") {
+            suggestions.push("/tools list - to see available tools".to_string());
+            suggestions.push("/execute tool=[name] args={...}".to_string());
+            suggestions.push("Try: 'use github tool to create issue'".to_string());
+        }
+        
+        // Limit suggestions to avoid overwhelming the user
+        if suggestions.len() > 5 {
+            suggestions.truncate(5);
+        }
+        
+        suggestions
     }
     
     /// Process search
@@ -624,47 +753,123 @@ impl NaturalLanguageHandler {
     /// Extract entities from input using advanced patterns
     fn extract_entities(&self, input: &str) -> Vec<(String, String)> {
         let mut entities = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         
-        // Extract dates/times
+        // Helper to add unique entities
+        let mut add_entity = |entity_type: String, value: String| {
+            let key = format!("{}:{}", entity_type, value);
+            if !seen.contains(&key) {
+                seen.insert(key);
+                entities.push((entity_type, value));
+            }
+        };
+        
+        // Extract dates/times with more patterns
         let date_patterns = [
-            (r"\b(today|tomorrow|yesterday)\b", "date"),
+            (r"\b(today|tomorrow|yesterday|now)\b", "date"),
+            (r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", "date"),
+            (r"\b(next|last|this)\s+(week|month|year)\b", "date"),
             (r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", "date"),
-            (r"\b(\d{1,2}:\d{2}(?:\s*[AP]M)?)\b", "time"),
+            (r"\b(\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?)\b", "time"),
+            (r"\b(morning|afternoon|evening|night|noon|midnight)\b", "time"),
         ];
         
         for (pattern, entity_type) in &date_patterns {
             if let Ok(regex) = Regex::new(pattern) {
                 for cap in regex.captures_iter(input) {
-                    if let Some(match_) = cap.get(1) {
-                        entities.push((entity_type.to_string(), match_.as_str().to_string()));
+                    if let Some(match_) = cap.get(0) {
+                        add_entity(entity_type.to_string(), match_.as_str().to_string());
                     }
                 }
             }
         }
         
-        // Extract numbers and measurements
-        if let Ok(number_regex) = Regex::new(r"\b(\d+(?:\.\d+)?(?:\s*(?:hours?|mins?|minutes?|days?|weeks?))?)\b") {
+        // Extract numbers and measurements with units
+        if let Ok(number_regex) = Regex::new(r"\b(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB|bytes?|hours?|mins?|minutes?|secs?|seconds?|days?|weeks?|months?|years?|%|percent)\b") {
             for cap in number_regex.captures_iter(input) {
-                if let Some(match_) = cap.get(1) {
-                    entities.push(("measurement".to_string(), match_.as_str().to_string()));
+                if let Some(match_) = cap.get(0) {
+                    add_entity("measurement".to_string(), match_.as_str().to_string());
+                }
+            }
+        }
+        
+        // Extract version numbers
+        if let Ok(version_regex) = Regex::new(r"v?\d+\.\d+(?:\.\d+)?(?:-[\w\.-]+)?") {
+            for cap in version_regex.captures_iter(input) {
+                if let Some(match_) = cap.get(0) {
+                    add_entity("version".to_string(), match_.as_str().to_string());
                 }
             }
         }
         
         // Extract quoted strings as potential entity values
-        if let Ok(quote_regex) = Regex::new(r#"["']([^"']+)["']"#) {
+        if let Ok(quote_regex) = Regex::new(r#"["'`]([^"'`]+)["'`]"#) {
             for cap in quote_regex.captures_iter(input) {
                 if let Some(match_) = cap.get(1) {
-                    entities.push(("quoted_text".to_string(), match_.as_str().to_string()));
+                    add_entity("quoted_text".to_string(), match_.as_str().to_string());
                 }
             }
         }
         
-        // Extract file paths
-        if let Ok(path_regex) = Regex::new(r"\b([\w/\\.]+\.[a-zA-Z]{2,4})\b") {
+        // Extract file paths (Unix and Windows)
+        if let Ok(path_regex) = Regex::new(r#"(?:^|[\s"'])((?:[A-Za-z]:)?[\\/]?(?:[\w\-\.]+[\\/])*[\w\-\.]+\.[a-zA-Z]{2,4})(?:$|[\s"'])"#) {
             for cap in path_regex.captures_iter(input) {
                 if let Some(match_) = cap.get(1) {
-                    entities.push(("file_path".to_string(), match_.as_str().to_string()));
+                    add_entity("file_path".to_string(), match_.as_str().to_string());
+                }
+            }
+        }
+        
+        // Extract URLs
+        if let Ok(url_regex) = Regex::new(r#"https?://[^\s<>"]+|www\.[^\s<>"]+"#) {
+            for cap in url_regex.captures_iter(input) {
+                if let Some(match_) = cap.get(0) {
+                    add_entity("url".to_string(), match_.as_str().to_string());
+                }
+            }
+        }
+        
+        // Extract email addresses
+        if let Ok(email_regex) = Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b") {
+            for cap in email_regex.captures_iter(input) {
+                if let Some(match_) = cap.get(0) {
+                    add_entity("email".to_string(), match_.as_str().to_string());
+                }
+            }
+        }
+        
+        // Extract GitHub references
+        if let Ok(github_regex) = Regex::new(r"(?:github\.com/)?([A-Za-z0-9-]+/[A-Za-z0-9-_.]+)(?:#\d+)?") {
+            for cap in github_regex.captures_iter(input) {
+                if let Some(match_) = cap.get(1) {
+                    add_entity("github_repo".to_string(), match_.as_str().to_string());
+                }
+            }
+        }
+        
+        // Extract hashtags
+        if let Ok(hashtag_regex) = Regex::new(r"#([A-Za-z][A-Za-z0-9_]+)") {
+            for cap in hashtag_regex.captures_iter(input) {
+                if let Some(match_) = cap.get(1) {
+                    add_entity("hashtag".to_string(), match_.as_str().to_string());
+                }
+            }
+        }
+        
+        // Extract programming language names
+        let languages = ["rust", "python", "javascript", "typescript", "java", "c++", "c#", "go", "ruby", "swift"];
+        let input_lower = input.to_lowercase();
+        for lang in &languages {
+            if input_lower.contains(lang) {
+                add_entity("language".to_string(), lang.to_string());
+            }
+        }
+        
+        // Extract command names (things that look like CLI commands)
+        if let Ok(cmd_regex) = Regex::new(r"\b(git|npm|cargo|pip|docker|kubectl|make|cmake|apt|brew|yarn)\s+\w+") {
+            for cap in cmd_regex.captures_iter(input) {
+                if let Some(match_) = cap.get(0) {
+                    add_entity("command".to_string(), match_.as_str().to_string());
                 }
             }
         }
@@ -741,19 +946,25 @@ impl NaturalLanguageHandler {
                         confidence: 0.8,
                         args: vec![task.description.clone()],
                         original_input: input.to_string(),
+                        suggestions: vec![],
                     }));
                 }
                 
-                // TODO: Check for tool suggestions when field is available
-                // if !response.tool_suggestions.is_empty() {
-                //     let tool = &response.tool_suggestions[0];
-                //     return Ok(Some(NlpIntent {
-                //         command: NlpCommand::RunTool,
-                //         confidence: 0.7,
-                //         args: vec![tool.name.clone()],
-                //         original_input: input.to_string(),
-                //     }));
-                // }
+                // Check for tool suggestions
+                if !response.tool_suggestions.is_empty() {
+                    let tool = &response.tool_suggestions[0];
+                    return Ok(Some(NlpIntent {
+                        command: NlpCommand::RunTool,
+                        confidence: 0.7,
+                        args: vec![
+                            tool.tool.clone(),
+                            serde_json::to_string(&tool.args)
+                                .unwrap_or_else(|_| "{}".to_string())
+                        ],
+                        original_input: input.to_string(),
+                        suggestions: vec![],
+                    }));
+                }
             }
             Err(e) => {
                 tracing::debug!("NLP orchestrator analysis failed, falling back to basic analysis: {}", e);
@@ -772,6 +983,7 @@ impl NaturalLanguageHandler {
                     confidence: 0.7 + (sentiment * 0.1),
                     args: entities.into_iter().map(|(_, v)| v).collect(),
                     original_input: input.to_string(),
+                    suggestions: vec![],
                 }));
             }
             
@@ -781,6 +993,7 @@ impl NaturalLanguageHandler {
                     confidence: 0.7 + (sentiment * 0.1),
                     args: entities.into_iter().map(|(_, v)| v).collect(),
                     original_input: input.to_string(),
+                    suggestions: vec![],
                 }));
             }
             
@@ -791,6 +1004,7 @@ impl NaturalLanguageHandler {
                     confidence: 0.65,
                     args: vec![input.to_string()],
                     original_input: input.to_string(),
+                    suggestions: vec![],
                 }));
             }
         }
@@ -803,6 +1017,7 @@ impl NaturalLanguageHandler {
                 confidence: 0.7 + (urgency * 0.2),
                 args: vec![content.to_string()],
                 original_input: input.to_string(),
+                suggestions: vec![],
             }));
         }
         
@@ -870,6 +1085,7 @@ impl NaturalLanguageHandler {
                     confidence: 0.75 + (sentiment * 0.05) + (urgency * 0.1),
                     args,
                     original_input: input.to_string(),
+                    suggestions: vec![],
                 });
             }
         }

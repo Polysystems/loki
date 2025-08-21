@@ -315,7 +315,6 @@ pub enum BlenderEvent {
 }
 
 /// Main Blender integration manager
-#[derive(Debug)]
 pub struct BlenderIntegration {
     config: BlenderConfig,
     cognitive_system: Arc<CognitiveSystem>,

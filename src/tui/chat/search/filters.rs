@@ -29,6 +29,18 @@ pub struct ChatSearchFilters {
     
     /// Use regex
     pub use_regex: bool,
+    
+    /// Minimum message length
+    pub min_length: Option<usize>,
+    
+    /// Maximum message length
+    pub max_length: Option<usize>,
+    
+    /// Filter for messages with code blocks
+    pub has_code_blocks: Option<bool>,
+    
+    /// Filter for messages with links
+    pub has_links: Option<bool>,
 }
 
 /// Message type filter options

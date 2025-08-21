@@ -212,7 +212,7 @@ impl StoryChatEnhancement {
             .await?;
 
         // Format generated code
-        let mut content = format!("📝 Generated Code with Story Principles:\n\n");
+        let content = format!("📝 Generated Code with Story Principles:\n\n");
 
         Ok(StoryCommandResult {
             content,

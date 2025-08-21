@@ -206,6 +206,37 @@ pub enum SystemEvent {
         value: f64,
     },
     
+    // Story events
+    StoryProgressed {
+        story_id: String,
+        plot_point: String,
+        source: TabId,
+    },
+    StoryArcChanged {
+        story_id: String,
+        from_arc: String,
+        to_arc: String,
+        source: TabId,
+    },
+    StoryTaskCreated {
+        story_id: String,
+        task_id: String,
+        task_description: String,
+        source: TabId,
+    },
+    StoryNarrativeUpdated {
+        story_id: String,
+        narrative: String,
+        confidence: f32,
+        source: TabId,
+    },
+    StoryTodoMapped {
+        story_id: String,
+        todo_id: String,
+        mapping_type: String,
+        source: TabId,
+    },
+    
     // Storage events
     StorageUnlocked,
     StorageLocked,
@@ -445,7 +476,10 @@ impl EventBus {
         self.event_history.push(history_entry);
         
         // Send through channel for processing
-        self.event_tx.send(priority_event)?;
+        if let Err(e) = self.event_tx.send(priority_event) {
+            error!("Failed to send event {} through channel: {}", event_id, e);
+            return Err(anyhow::anyhow!("Event channel send failed: {}", e));
+        }
         
         // Update stats
         self.events_published.fetch_add(1, Ordering::Relaxed);
@@ -534,6 +568,11 @@ impl EventBus {
             SystemEvent::ConfigurationChanged { .. } => "ConfigurationChanged".to_string(),
             SystemEvent::ErrorOccurred { .. } => "ErrorOccurred".to_string(),
             SystemEvent::MetricsUpdated { .. } => "MetricsUpdated".to_string(),
+            SystemEvent::StoryProgressed { .. } => "StoryProgressed".to_string(),
+            SystemEvent::StoryArcChanged { .. } => "StoryArcChanged".to_string(),
+            SystemEvent::StoryTaskCreated { .. } => "StoryTaskCreated".to_string(),
+            SystemEvent::StoryNarrativeUpdated { .. } => "StoryNarrativeUpdated".to_string(),
+            SystemEvent::StoryTodoMapped { .. } => "StoryTodoMapped".to_string(),
             SystemEvent::CustomEvent { name, .. } => name.clone(),
             SystemEvent::StorageUnlocked => "StorageUnlocked".to_string(),
             SystemEvent::StorageLocked => "StorageLocked".to_string(),
@@ -556,6 +595,13 @@ impl EventBus {
                     SystemEvent::ContextRetrieved { source, .. } |
                     SystemEvent::MessageReceived { source, .. } |
                     SystemEvent::ErrorOccurred { source, .. } |
+                    SystemEvent::StoryProgressed { source, .. } |
+                    SystemEvent::StoryArcChanged { source, .. } |
+                    SystemEvent::StoryTaskCreated { source, .. } |
+                    SystemEvent::StoryNarrativeUpdated { source, .. } |
+                    SystemEvent::StoryTodoMapped { source, .. } |
+                    SystemEvent::ApiKeyStored { source, .. } |
+                    SystemEvent::DatabaseConfigSaved { source, .. } |
                     SystemEvent::CustomEvent { source, .. } => source == tab_id,
                     _ => true,
                 }
@@ -605,6 +651,21 @@ impl EventBus {
     /// Clear event history
     pub async fn clear_history(&self) {
         self.event_history.clear();
+    }
+    
+    /// Broadcast an event to all subscribers (high priority)
+    pub async fn broadcast(&self, event: SystemEvent) -> Result<()> {
+        self.publish_with_priority(event, EventPriority::High).await
+    }
+    
+    /// Broadcast a critical system event  
+    pub async fn broadcast_critical(&self, event: SystemEvent) -> Result<()> {
+        self.publish_with_priority(event, EventPriority::Critical).await
+    }
+    
+    /// Emit an event (alias for publish for compatibility)
+    pub async fn emit(&self, event: SystemEvent) -> Result<()> {
+        self.publish(event).await
     }
     
     /// Start the event processing loop

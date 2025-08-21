@@ -5,14 +5,13 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 use anyhow::{Result, Context};
 use serde::{Serialize, Deserialize};
-use serde_json::Value as JsonValue;
 
 use super::event_bridge::EventBridge;
 use crate::tui::event_bus::{SystemEvent, TabId};
-use crate::tui::chat::editor::{IntegratedEditor, EditorConfig, EditAction, CursorPosition, SelectionRange};
+use crate::tui::chat::editor::{IntegratedEditor, EditorConfig, EditAction};
 
 /// Editor bridge for cross-tab communication
 pub struct EditorBridge {
@@ -251,7 +250,7 @@ impl EditorBridge {
     
     /// Spawn agents for code generation
     async fn spawn_code_agents(&self, request: &CodeGenerationRequest) -> Result<()> {
-        use crate::tui::chat::agents::code_agent::{CodeAgentFactory, CodeAgent, AgentUpdate, CodeTask, TaskPriority, ComplexityLevel};
+        use crate::tui::chat::agents::code_agent::{CodeAgentFactory, CodeTask, TaskPriority, ComplexityLevel};
         
         // Create update channel for agent
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(100);

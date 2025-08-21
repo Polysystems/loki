@@ -4,7 +4,7 @@
 
 pub mod chat_tab;
 pub mod editor_tab;
-pub mod models_tab;
+pub mod models_tab_unified;  // Unified models implementation
 pub mod history_tab;
 pub mod settings_tab;
 pub mod orchestration_tab;
@@ -15,7 +15,7 @@ pub mod statistics_tab;
 // Re-export subtab trait and implementations
 pub use chat_tab::ChatTab;
 pub use editor_tab::EditorTab;
-pub use models_tab::ModelsTab;
+pub use models_tab_unified::UnifiedModelsTab as ModelsTab;
 pub use history_tab::HistoryTab;
 pub use settings_tab::SettingsTab;
 pub use orchestration_tab::OrchestrationTab;

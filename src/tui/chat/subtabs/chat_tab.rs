@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use anyhow::Result;
 
 use super::SubtabController;
@@ -69,12 +69,37 @@ pub struct ChatTab {
     
     /// Show insights panel
     show_insights_panel: bool,
-    
-    /// Whether the chat area is currently focused (vs input area)
-    chat_focused: bool,
 }
 
 impl ChatTab {
+    /// Handle mouse events for scrolling
+    pub fn handle_mouse_event(&mut self, event: MouseEvent) -> Result<()> {
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                // Scroll up to see older messages
+                self.scroll_offset += 3;  // Scroll 3 messages at a time
+                self.smooth_scroll.scroll_to(self.scroll_offset);
+                self.toast_manager.add_toast(
+                    "Scrolling up".to_string(),
+                    ToastType::Info
+                );
+            }
+            MouseEventKind::ScrollDown => {
+                // Scroll down to see newer messages
+                self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                if self.scroll_offset == 0 {
+                    self.toast_manager.add_toast(
+                        "At latest messages".to_string(),
+                        ToastType::Info
+                    );
+                }
+                self.smooth_scroll.scroll_to(self.scroll_offset);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    
     /// Update orchestration state
     fn update_orchestration_state(&mut self) {
         // This is called during render to ensure state is current
@@ -145,7 +170,6 @@ impl ChatTab {
             active_tools: Vec::new(),
             cognitive_insights: Vec::new(),
             show_insights_panel: false,
-            chat_focused: false,
         }
     }
     
@@ -198,14 +222,17 @@ impl ChatTab {
     
     /// Render the messages area
     fn render_messages(&mut self, f: &mut Frame, area: Rect, messages: &[AssistantResponseType]) {
-        // Collect all message lines
-        let mut all_lines: Vec<Line> = Vec::new();
+        // Collect all message lines as ListItems
+        let mut list_items: Vec<ListItem> = Vec::new();
         
         for msg in messages {
             match msg {
                 AssistantResponseType::Message { author, message, timestamp, .. } => {
+                    // Create a multi-line ListItem for this message
+                    let mut lines = Vec::new();
+                    
                     // Add header line
-                    all_lines.push(Line::from(vec![
+                    lines.push(Line::from(vec![
                         Span::styled(
                             format!("[{}] ", timestamp),
                             Style::default().fg(Color::DarkGray),
@@ -216,20 +243,35 @@ impl ChatTab {
                         ),
                     ]));
                     
-                    // Add message content with proper wrapping
+                    // Add message content with manual wrapping for long lines
+                    let max_width = area.width.saturating_sub(4) as usize; // Account for borders and padding
                     for line in message.lines() {
                         if line.trim().is_empty() {
-                            all_lines.push(Line::from(""));
-                        } else {
-                            all_lines.push(Line::from(Span::styled(
+                            lines.push(Line::from(""));
+                        } else if line.len() <= max_width {
+                            // Line fits, add as-is
+                            lines.push(Line::from(Span::styled(
                                 line.to_string(),
                                 Style::default().fg(Color::White),
                             )));
+                        } else {
+                            // Line is too long, wrap it manually
+                            let wrapped = Self::wrap_text(line, max_width);
+                            for wrapped_line in wrapped {
+                                lines.push(Line::from(Span::styled(
+                                    wrapped_line,
+                                    Style::default().fg(Color::White),
+                                )));
+                            }
                         }
                     }
-                    all_lines.push(Line::from(""));
+                    
+                    // Add the complete message as a single ListItem
+                    list_items.push(ListItem::new(lines));
                 }
                 AssistantResponseType::Stream { author, partial_content, stream_state, timestamp, .. } => {
+                    let mut lines = Vec::new();
+                    
                     // Determine streaming status and progress
                     let (status_indicator, color) = match stream_state {
                         crate::tui::run::StreamingState::Streaming { progress, .. } => {
@@ -246,7 +288,7 @@ impl ChatTab {
                     };
                     
                     // Add header with streaming status
-                    all_lines.push(Line::from(vec![
+                    lines.push(Line::from(vec![
                         Span::styled(
                             format!("[{}] ", timestamp),
                             Style::default().fg(Color::DarkGray),
@@ -261,38 +303,49 @@ impl ChatTab {
                         ),
                     ]));
                     
-                    // Add partial content with proper formatting
+                    // Add partial content with manual wrapping for long lines
+                    let max_width = area.width.saturating_sub(4) as usize;
                     for line in partial_content.lines() {
                         if line.trim().is_empty() {
-                            all_lines.push(Line::from(""));
-                        } else {
-                            all_lines.push(Line::from(Span::styled(
+                            lines.push(Line::from(""));
+                        } else if line.len() <= max_width {
+                            lines.push(Line::from(Span::styled(
                                 line.to_string(),
                                 Style::default().fg(Color::White),
                             )));
+                        } else {
+                            // Wrap long lines manually
+                            let wrapped = Self::wrap_text(line, max_width);
+                            for wrapped_line in wrapped {
+                                lines.push(Line::from(Span::styled(
+                                    wrapped_line,
+                                    Style::default().fg(Color::White),
+                                )));
+                            }
                         }
                     }
                     
                     // Add cursor/typing indicator if still streaming
                     if matches!(stream_state, crate::tui::run::StreamingState::Streaming { .. }) {
-                        all_lines.push(Line::from(Span::styled(
+                        lines.push(Line::from(Span::styled(
                             "█", // Blinking cursor
                             Style::default().fg(color).add_modifier(Modifier::RAPID_BLINK),
                         )));
                     }
                     
-                    all_lines.push(Line::from(""));
+                    list_items.push(ListItem::new(lines));
                 }
                 AssistantResponseType::Error { error_type, message, .. } => {
-                    all_lines.push(Line::from(Span::styled(
+                    let mut lines = Vec::new();
+                    lines.push(Line::from(Span::styled(
                         format!("Error [{}]", error_type),
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     )));
-                    all_lines.push(Line::from(Span::styled(
+                    lines.push(Line::from(Span::styled(
                         message.clone(),
                         Style::default().fg(Color::Red),
                     )));
-                    all_lines.push(Line::from(""));
+                    list_items.push(ListItem::new(lines));
                 }
                 _ => {}
             }
@@ -301,76 +354,52 @@ impl ChatTab {
         // Add typing indicator if AI is processing
         let typing_text = self.typing_indicator.render();
         if !typing_text.is_empty() {
-            all_lines.push(Line::from(Span::styled(
+            list_items.push(ListItem::new(Line::from(Span::styled(
                 typing_text,
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
-            )));
+            ))));
         }
         
-        // Calculate scrolling
-        let total_lines = all_lines.len();
-        let visible_lines = area.height.saturating_sub(2) as usize;
+        // Calculate scrolling for the list with proper pagination
+        let total_items = list_items.len();
+        let visible_height = area.height.saturating_sub(2) as usize;
         
-        // Determine which lines to show based on scroll offset
-        // Calculate the visible range
-        // scroll_offset = 0 means we're at the bottom (newest messages)
-        // scroll_offset > 0 means we're scrolled up to see older messages
-        let start_line = if total_lines <= visible_lines {
-            // All messages fit - show everything
-            0
-        } else if self.scroll_offset == 0 {
-            // At bottom - show latest messages
-            total_lines.saturating_sub(visible_lines)
+        // Implement proper pagination
+        let visible_items = if total_items > visible_height {
+            // Auto-scroll to bottom for new messages (when scroll_offset is 0)
+            let start_idx = if self.scroll_offset == 0 {
+                // Show the latest messages at the bottom
+                total_items.saturating_sub(visible_height)
+            } else {
+                // Manual scrolling - ensure we don't go out of bounds
+                let max_offset = total_items.saturating_sub(visible_height);
+                (max_offset).saturating_sub(self.scroll_offset.min(max_offset))
+            };
+            
+            let end_idx = (start_idx + visible_height).min(total_items);
+            list_items[start_idx..end_idx].to_vec()
         } else {
-            // Scrolled up - calculate position
-            let max_scroll = total_lines.saturating_sub(visible_lines);
-            let effective_offset = self.scroll_offset.min(max_scroll);
-            max_scroll.saturating_sub(effective_offset)
+            // All items fit in the view
+            list_items
         };
-        
-        let visible_line_count = visible_lines.min(total_lines.saturating_sub(start_line));
-        let visible_lines: Vec<Line> = all_lines.into_iter()
-            .skip(start_line)
-            .take(visible_line_count)
-            .collect();
-        
-        // Store the count before moving visible_lines
-        let visible_count = visible_lines.len();
         
         // Add scroll indicators to title
-        let title = if total_lines > visible_count {
-            let scroll_position = if self.scroll_offset == 0 {
-                "(at bottom)"
-            } else if start_line == 0 {
-                "(at top)"
-            } else {
-                "(scrolling)"
-            };
-            let focus_indicator = if self.chat_focused { " [FOCUSED]" } else { "" };
-            format!(" Chat History{} {} [PageUp/PageDown or Ctrl+↑↓ to scroll | Tab: toggle focus] ", focus_indicator, scroll_position)
-        } else {
-            let focus_indicator = if self.chat_focused { " [FOCUSED]" } else { "" };
-            format!(" Chat History{} [Tab: toggle focus] ", focus_indicator)
-        };
+        let title = format!(" Chat History ({} messages) [Ctrl+↑↓: scroll, PgUp/PgDn: page] ", total_items);
         
-        // Use Paragraph with wrapping for better text display
-        let messages_paragraph = Paragraph::new(visible_lines)
+        // Create the List widget with only the visible items
+        let messages_list = List::new(visible_items)
             .block(Block::default()
                 .borders(Borders::ALL)
-                .border_type(if self.chat_focused { BorderType::Thick } else { BorderType::Rounded })
-                .border_style(if self.chat_focused {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                })
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::DarkGray))
                 .title(title)
-                .title_alignment(Alignment::Center))
-            .wrap(Wrap { trim: false });
+                .title_alignment(Alignment::Center));
         
-        f.render_widget(messages_paragraph, area);
+        // Render the list without state
+        f.render_widget(messages_list, area);
         
         // Add scroll bar indicator on the right
-        if total_lines > visible_count && area.width > 3 {
+        if total_items > visible_height && area.width > 3 {
             let scrollbar_x = area.x + area.width - 1;
             let scrollbar_height = area.height.saturating_sub(2);
             let scrollbar_y = area.y + 1;
@@ -378,7 +407,7 @@ impl ChatTab {
             // Calculate scrollbar position
             // When scroll_offset = 0, we're at bottom (scrollbar at bottom)
             // When scroll_offset = max, we're at top (scrollbar at top)
-            let max_scroll = total_lines.saturating_sub(visible_count);
+            let max_scroll = total_items.saturating_sub(visible_height);
             let scroll_ratio = if max_scroll > 0 {
                 1.0 - (self.scroll_offset.min(max_scroll) as f32 / max_scroll as f32)
             } else {
@@ -435,12 +464,15 @@ impl ChatTab {
                         if self.selected_model.is_none() || 
                            (self.selected_model.as_ref().map_or(true, |s| !manager.enabled_models.contains(s))) {
                             // Prefer local/Ollama models over API models
-                            let selected = manager.enabled_models.iter()
+                            if let Some(selected) = manager.enabled_models.iter()
                                 .find(|m| !m.contains("gpt") && !m.contains("claude") && !m.contains("gemini"))
-                                .or_else(|| manager.enabled_models.first())
-                                .unwrap();
-                            self.selected_model = Some(selected.clone());
-                            tracing::debug!("Updated selected model to: {}", selected);
+                                .or_else(|| manager.enabled_models.first()) {
+                                self.selected_model = Some(selected.clone());
+                                tracing::debug!("Updated selected model to: {}", selected);
+                            } else {
+                                tracing::warn!("No models available to select");
+                                self.selected_model = None;
+                            }
                         }
                     }
                     
@@ -502,7 +534,7 @@ impl ChatTab {
     
     /// Render the input area
     fn render_input(&self, f: &mut Frame, area: Rect) {
-        let input_style = if self.input_mode && !self.chat_focused {
+        let input_style = if self.input_mode {
             Style::default().fg(Color::Yellow)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -527,7 +559,7 @@ impl ChatTab {
         };
         
         // Add scroll indicator to title when needed
-        let title = if self.input_mode && !self.chat_focused {
+        let title = if self.input_mode {
             if total_lines > visible_lines {
                 let scroll_info = if self.input_scroll_offset == 0 {
                     "(top)"
@@ -536,14 +568,12 @@ impl ChatTab {
                 } else {
                     "(scrolling)"
                 };
-                format!(" Message {} [FOCUSED] {} ", scroll_info, "▌")
+                format!(" Message {} (Enter to send) {} ", scroll_info, "▌")
             } else {
-                format!(" Message [FOCUSED] (Enter to send) {} ", "▌")
+                format!(" Message (Enter to send) {} ", "▌")
             }
-        } else if self.chat_focused {
-            " Message (Tab to focus input) ".to_string()
         } else {
-            " Message (Tab to focus) ".to_string()
+            " Message (Tab to enter input mode) ".to_string()
         };
         
         // Create the input widget with the visible text only
@@ -551,9 +581,9 @@ impl ChatTab {
             .style(input_style)
             .block(Block::default()
                 .borders(Borders::ALL)
-                .border_type(if self.input_mode && !self.chat_focused { BorderType::Thick } else { BorderType::Rounded })
+                .border_type(if self.input_mode { BorderType::Thick } else { BorderType::Rounded })
                 .title(title)
-                .border_style(if self.input_mode && !self.chat_focused {
+                .border_style(if self.input_mode {
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
@@ -914,7 +944,8 @@ impl SubtabController for ChatTab {
         match key.code {
             KeyCode::PageUp => {
                 // Page up to see older messages (scroll up in history)
-                self.scroll_offset += 10;
+                // Scroll by a reasonable number of messages, not lines
+                self.scroll_offset += 3;  // Scroll 3 messages at a time
                 self.smooth_scroll.scroll_to(self.scroll_offset);
                 self.toast_manager.add_toast(
                     "Scrolling up in history".to_string(),
@@ -924,7 +955,7 @@ impl SubtabController for ChatTab {
             }
             KeyCode::PageDown => {
                 // Page down to see newer messages (scroll down towards recent)
-                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                self.scroll_offset = self.scroll_offset.saturating_sub(3);  // Scroll 3 messages at a time
                 if self.scroll_offset == 0 {
                     self.toast_manager.add_toast(
                         "At latest messages".to_string(),
@@ -1014,25 +1045,25 @@ impl SubtabController for ChatTab {
         // Handle mode switching and other keys
         match key.code {
             KeyCode::Tab => {
+                // Toggle input mode
                 self.input_mode = !self.input_mode;
-                // Auto-scroll to bottom when entering input mode for convenience
                 if self.input_mode {
-                    self.scroll_offset = 0;
-                    // Reset input scroll when switching modes
+                    self.toast_manager.add_toast(
+                        "Input mode active - type your message".to_string(),
+                        ToastType::Info
+                    );
+                    // Reset input scroll when entering input mode
                     self.input_scroll_offset = 0;
+                } else {
+                    self.toast_manager.add_toast(
+                        "Navigation mode - press Tab to type".to_string(),
+                        ToastType::Info
+                    );
                 }
             }
             KeyCode::Esc => {
-                // Exit input mode with Escape key or switch focus to chat
-                if self.input_mode && !self.chat_focused {
-                    // If input is focused, switch to chat focus
-                    self.chat_focused = true;
-                    self.toast_manager.add_toast(
-                        "Switched to chat history".to_string(),
-                        ToastType::Info
-                    );
-                } else if self.chat_focused {
-                    // If chat is focused, exit input mode entirely
+                // Exit input mode with Escape key
+                if self.input_mode {
                     self.input_mode = false;
                     self.toast_manager.add_toast(
                         "Exited input mode".to_string(),
@@ -1077,23 +1108,8 @@ impl SubtabController for ChatTab {
                     });
                 }
             }
-            // Handle arrow keys for scrolling when chat is focused
-            KeyCode::Up if self.chat_focused => {
-                // Scroll chat history up one line (older messages)
-                self.scroll_offset += 1;
-                self.smooth_scroll.scroll_to(self.scroll_offset);
-                return Ok(());
-            }
-            KeyCode::Down if self.chat_focused => {
-                // Scroll chat history down one line (newer messages)
-                if self.scroll_offset > 0 {
-                    self.scroll_offset -= 1;
-                    self.smooth_scroll.scroll_to(self.scroll_offset);
-                }
-                return Ok(());
-            }
             _ => {
-                if self.input_mode && !self.chat_focused {
+                if self.input_mode {
                     // When in input mode AND input is focused, handle all input through the processor
                     // Arrow keys in input mode navigate history, not scroll
                     tokio::task::block_in_place(|| {
@@ -1128,39 +1144,15 @@ impl SubtabController for ChatTab {
                         self.input_scroll_offset = cursor_line;
                     }
                 } else {
-                    // Navigation mode - handle scrolling
+                    // Navigation mode - handle vim-like keys
                     match key.code {
-                        KeyCode::Up => {
-                            // Scroll up to see older messages (increase offset)
-                            self.scroll_offset += 1;
-                            self.smooth_scroll.scroll_to(self.scroll_offset);
-                        }
-                        KeyCode::Down => {
-                            // Scroll down to see newer messages (decrease offset)
-                            if self.scroll_offset > 0 {
-                                self.scroll_offset -= 1;
-                                self.smooth_scroll.scroll_to(self.scroll_offset);
-                            }
-                        }
-                        // PageUp/PageDown are handled above for both modes
-                        KeyCode::Home => {
-                            // Jump to oldest messages
-                            let state = tokio::task::block_in_place(|| {
-                                tokio::runtime::Handle::current().block_on(async {
-                                    self.state.read().await.messages.len()
-                                })
-                            });
-                            self.scroll_offset = state * 2; // Large value to reach the top
-                            self.smooth_scroll.scroll_to(self.scroll_offset);
-                        }
-                        KeyCode::End => {
-                            // Jump to newest messages
-                            self.scroll_offset = 0;
-                            self.smooth_scroll.scroll_to(0);
-                        }
                         KeyCode::Char('i') | KeyCode::Char('a') => {
                             // Enter input mode with 'i' or 'a' (vim-like)
                             self.input_mode = true;
+                            self.toast_manager.add_toast(
+                                "Input mode active - type your message".to_string(),
+                                ToastType::Info
+                            );
                         }
                         _ => {}
                     }

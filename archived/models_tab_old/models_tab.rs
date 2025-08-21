@@ -50,6 +50,9 @@ pub struct ModelsTab {
     
     /// Search query
     search_query: String,
+    
+    /// Search mode active
+    search_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +190,7 @@ impl ModelsTab {
             new_model_provider: "openai".to_string(),
             is_loading: false,
             search_query: String::new(),
+            search_mode: false,
         };
         
         // Load persisted model states
@@ -319,9 +323,19 @@ impl SubtabController for ModelsTab {
             ])
             .split(area);
         
-        // Title
-        let title = Paragraph::new("🤖 Model Configuration")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        // Title with search indicator
+        let title_text = if self.search_mode {
+            format!("🔍 Search: {} (ESC to cancel)", self.search_query)
+        } else {
+            "🤖 Model Configuration".to_string()
+        };
+        
+        let title = Paragraph::new(title_text)
+            .style(if self.search_mode {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            })
             .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::BOTTOM));
         f.render_widget(title, chunks[0]);
@@ -380,6 +394,40 @@ impl SubtabController for ModelsTab {
     }
     
     fn handle_input(&mut self, key: KeyEvent) -> Result<()> {
+        // Handle search mode input
+        if self.search_mode {
+            match key.code {
+                KeyCode::Esc => {
+                    self.search_mode = false;
+                    self.search_query.clear();
+                }
+                KeyCode::Enter => {
+                    // Find first matching model and select it
+                    if let Some(index) = self.available_models.iter().position(|m| 
+                        m.name.to_lowercase().contains(&self.search_query.to_lowercase())
+                    ) {
+                        self.selected_index = index;
+                    }
+                    self.search_mode = false;
+                    self.search_query.clear();
+                }
+                KeyCode::Backspace => {
+                    self.search_query.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.search_query.push(c);
+                    // Auto-select first matching model as user types
+                    if let Some(index) = self.available_models.iter().position(|m| 
+                        m.name.to_lowercase().contains(&self.search_query.to_lowercase())
+                    ) {
+                        self.selected_index = index;
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        
         // Handle add model mode input
         if self.add_model_mode {
             match key.code {
@@ -443,8 +491,10 @@ impl SubtabController for ModelsTab {
                 }
             }
             KeyCode::Char('/') => {
-                // TODO: Implement search mode
-                tracing::info!("Search mode not yet implemented");
+                // Enter search mode
+                self.search_mode = true;
+                self.search_query.clear();
+                tracing::info!("Entered search mode - type to search models");
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 // Delete selected model (if not the last one)

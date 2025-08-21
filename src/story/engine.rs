@@ -466,6 +466,9 @@ impl StoryEngine {
             PlotType::Progress { .. } => 0.7,
             PlotType::Analysis { .. } => 0.8,
             PlotType::Action { .. } => 0.75,
+            PlotType::Reasoning { confidence, .. } => 0.7 * confidence,
+            PlotType::Event { impact, .. } => 0.6 * impact,
+            PlotType::Context { .. } => 0.5,
         }
     }
 
@@ -496,6 +499,15 @@ impl StoryEngine {
             }
             PlotType::Action { action_type, parameters, outcome } => {
                 format!("Action {}: {} → {}", action_type, parameters.join(", "), outcome)
+            }
+            PlotType::Reasoning { premise, conclusion, confidence } => {
+                format!("Reasoning: {} => {} (confidence: {:.1}%)", premise, conclusion, confidence * 100.0)
+            }
+            PlotType::Event { event_type, description, impact } => {
+                format!("Event [{}]: {} (impact: {:.1})", event_type, description, impact)
+            }
+            PlotType::Context { context_type, data } => {
+                format!("Context [{}]: {}", context_type, data)
             }
         }
     }
@@ -849,6 +861,15 @@ impl StoryEngine {
                         PlotType::Analysis { subject, .. } => subject.clone(),
                         PlotType::Progress { milestone, percentage } => format!("{} ({}%)", milestone, percentage * 100.0),
                         PlotType::Action { action_type, outcome, .. } => format!("{}: {}", action_type, outcome),
+                        PlotType::Reasoning { premise, conclusion, confidence } => {
+                            format!("Reasoning: {} => {} (confidence: {:.1}%)", premise, conclusion, confidence * 100.0)
+                        },
+                        PlotType::Event { event_type, description, .. } => {
+                            format!("{}: {}", event_type, description)
+                        },
+                        PlotType::Context { context_type, data } => {
+                            format!("{}: {}", context_type, data)
+                        },
                     };
 
                     return Ok(StorySegment {
@@ -868,6 +889,9 @@ impl StoryEngine {
                             PlotType::Analysis { .. } => SegmentType::Resolution,
                             PlotType::Progress { .. } => SegmentType::Development,
                             PlotType::Action { .. } => SegmentType::Resolution,
+                            PlotType::Reasoning { .. } => SegmentType::Development,
+                            PlotType::Event { .. } => SegmentType::Development,
+                            PlotType::Context { .. } => SegmentType::Introduction,
                         },
                         tags: plot_point.tags.clone(),
                     });
@@ -1277,6 +1301,9 @@ impl StoryEngine {
         
         // Build narrative context
         let mut context = NarrativeContext {
+            story_id: primary_story.map(|s| s.id).unwrap_or_else(|| StoryId(uuid::Uuid::new_v4())),
+            current_plot: String::new(),
+            current_arc: None,
             current_chapter: String::new(),
             active_plot_points: Vec::new(),
             story_themes: Vec::new(),
@@ -1292,6 +1319,7 @@ impl StoryEngine {
             // Set current chapter from active arc
             if let Some(arc) = story.arcs.iter().find(|a| matches!(a.status, ArcStatus::Active)) {
                 context.current_chapter = arc.title.clone();
+                context.current_arc = Some(arc.clone());
                 
                 // Add active plot points
                 for plot_point in &arc.plot_points {

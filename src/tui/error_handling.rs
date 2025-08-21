@@ -4,12 +4,12 @@
 //! for the TUI system.
 
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use serde::{Serialize, Deserialize};
 use anyhow::{Result, Error};
-use tracing::{error, warn, info, debug};
+use tracing::{error, warn, info};
 
 use crate::tui::event_bus::{EventBus, SystemEvent, TabId, ErrorSeverity};
 

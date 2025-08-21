@@ -23,11 +23,21 @@ pub struct MessageTransformer {
 
 impl Default for MessageTransformer {
     fn default() -> Self {
+        // These regex patterns are known to be valid, but we'll handle errors gracefully
+        let code_block_regex = Regex::new(r"```(\w+)?\n([\s\S]*?)```")
+            .expect("Valid code block regex pattern");
+        let command_regex = Regex::new(r"^/(\w+)(?:\s+(.*))?$")
+            .expect("Valid command regex pattern");
+        let mention_regex = Regex::new(r"@(\w+)")
+            .expect("Valid mention regex pattern");
+        let url_regex = Regex::new(r"https?://[^\s]+")
+            .expect("Valid URL regex pattern");
+        
         Self {
-            code_block_regex: Regex::new(r"```(\w+)?\n([\s\S]*?)```").unwrap(),
-            command_regex: Regex::new(r"^/(\w+)(?:\s+(.*))?$").unwrap(),
-            mention_regex: Regex::new(r"@(\w+)").unwrap(),
-            url_regex: Regex::new(r"https?://[^\s]+").unwrap(),
+            code_block_regex,
+            command_regex,
+            mention_regex,
+            url_regex,
         }
     }
 }
@@ -49,8 +59,8 @@ impl MessageTransformer {
                     content: formatted_content,
                     model: author.clone(),
                     timestamp: chrono::DateTime::parse_from_rfc3339(timestamp)
-                        .unwrap_or_else(|_| chrono::Utc::now().into())
-                        .with_timezone(&chrono::Utc),
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
                     metadata,
                     message_type: MessageType::Regular,
                 })
@@ -69,8 +79,8 @@ impl MessageTransformer {
                     content: format!("❌ {}: {}", error_type, message),
                     model: "system".to_string(),
                     timestamp: chrono::DateTime::parse_from_rfc3339(timestamp)
-                        .unwrap_or_else(|_| chrono::Utc::now().into())
-                        .with_timezone(&chrono::Utc),
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
                     metadata: MessageMetadata::default(),
                     message_type: MessageType::Error,
                 })

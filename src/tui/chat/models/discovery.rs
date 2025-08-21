@@ -359,6 +359,16 @@ impl ModelDiscoveryEngine {
         self.catalog.read().await.clone()
     }
     
+    /// Get the number of providers
+    pub fn get_provider_count(&self) -> usize {
+        // Use block_in_place to access the async field synchronously
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.providers.read().await.len()
+            })
+        })
+    }
+    
     /// Get provider status
     pub async fn get_provider_status(&self) -> HashMap<String, ProviderStatus> {
         self.provider_status.read().await.clone()

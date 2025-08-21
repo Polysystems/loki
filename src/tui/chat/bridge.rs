@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use ratatui::{Frame, layout::Rect};
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent};
 use anyhow::Result;
 
 use crate::tui::App;
@@ -35,6 +35,8 @@ impl ChatSubtabBridge {
         orchestration: Arc<RwLock<super::orchestration::OrchestrationManager>>,
         message_tx: mpsc::Sender<(String, usize)>,
         available_models: Vec<crate::tui::chat::ActiveModel>,
+        model_orchestrator: Option<Arc<crate::models::ModelOrchestrator>>,
+        ollama_manager: Option<Arc<crate::ollama::OllamaManager>>,
     ) -> Self {
         let chat_tab = ChatTab::new(chat_state.clone(), message_tx);
         
@@ -47,7 +49,7 @@ impl ChatSubtabBridge {
         settings_tab.set_state(orchestration.clone());
         
         // Create agents tab with references
-        let mut agents_tab = AgentsTab::new();
+        let agents_tab = AgentsTab::new();
         
         // Create and initialize the editor tab
         let mut editor_tab = EditorTab::new();
@@ -63,7 +65,34 @@ impl ChatSubtabBridge {
         
         let other_subtabs: Vec<Box<dyn SubtabController + Send + Sync>> = vec![
             Box::new(editor_tab_initialized),
-            Box::new(ModelsTab::new(orchestration.clone(), available_models)),
+            // Create models tab with proper orchestrator
+            if let Some(orchestrator) = model_orchestrator {
+                let mut models_tab = Box::new(ModelsTab::new(orchestrator));
+                if let Some(ollama) = ollama_manager {
+                    models_tab.set_ollama_manager(ollama);
+                }
+                // Initialize the models tab
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        if let Err(e) = models_tab.initialize().await {
+                            tracing::warn!("Failed to initialize models tab: {}", e);
+                        }
+                    })
+                });
+                models_tab
+            } else {
+                // Fallback: create with default orchestrator
+                let default_orchestrator = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        crate::models::ModelOrchestrator::new(&crate::config::ApiKeysConfig::default()).await
+                    })
+                });
+                if let Ok(orchestrator) = default_orchestrator {
+                    Box::new(ModelsTab::new(Arc::new(orchestrator)))
+                } else {
+                    panic!("Failed to create ModelOrchestrator for models tab");
+                }
+            },
             Box::new(history_tab),
             Box::new(settings_tab),
             Box::new(OrchestrationTab::new(orchestration.clone())),
@@ -107,6 +136,16 @@ impl ChatSubtabBridge {
                 Ok(())
             }
         }
+    }
+    
+    /// Handle mouse events for the current subtab
+    pub fn handle_mouse_event(&mut self, mouse: MouseEvent) -> Result<()> {
+        // Currently only the chat tab handles mouse events
+        if self.current_index == 0 {
+            self.chat_tab.handle_mouse_event(mouse)?;
+        }
+        // Other tabs can implement mouse handling in the future
+        Ok(())
     }
     
     /// Update the current subtab

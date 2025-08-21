@@ -308,7 +308,7 @@ impl WorkflowManager {
             self.current_state = template.initial_state.clone();
             Ok(self.format_current_prompt())
         } else {
-            Err(anyhow!("Unknown workflow template: {}", template_name))
+            Err(anyhow!("Unknown workflow template '{}'. Available templates: {:?}", template_name, self.templates.keys().collect::<Vec<_>>()))
         }
     }
     
@@ -330,7 +330,7 @@ impl WorkflowManager {
         // Process based on current state - clone to avoid borrow issues
         match self.current_state.clone() {
             ExtendedWorkflowState::None => {
-                Err(anyhow!("No active workflow"))
+                Err(anyhow!("No active workflow. Please start a workflow first using 'start_workflow()'"))
             }
             ExtendedWorkflowState::ToolExecution { tool_name, mut step, mut collected_params, required_params } => {
                 self.process_tool_execution(input, &tool_name, &mut step, &mut collected_params, &required_params)
@@ -387,7 +387,7 @@ impl WorkflowManager {
                 // Find current parameter requirement
                 let param_req = required_params.iter()
                     .find(|p| p.name == *current_param)
-                    .ok_or_else(|| anyhow!("Parameter requirement not found"))?;
+                    .ok_or_else(|| anyhow!("Parameter requirement not found for param '{}'", current_param))?;
                 
                 // Validate and store input
                 let value = self.parse_parameter_value(input, &param_req.param_type)?;
@@ -634,16 +634,16 @@ impl WorkflowManager {
             }
             ContextType::Number { min, max } => {
                 let num: f64 = input.parse()
-                    .map_err(|_| anyhow!("Invalid number"))?;
+                    .map_err(|e| anyhow!("Invalid number: {}", e))?;
                 
                 if let Some(min_val) = min {
                     if num < *min_val {
-                        return Err(anyhow!("Number must be at least {}", min_val));
+                        return Err(anyhow!("Number {} must be at least {} (minimum value constraint)", num, min_val));
                     }
                 }
                 if let Some(max_val) = max {
                     if num > *max_val {
-                        return Err(anyhow!("Number must be at most {}", max_val));
+                        return Err(anyhow!("Number {} must be at most {} (maximum value constraint)", num, max_val));
                     }
                 }
                 
@@ -742,7 +742,7 @@ impl WorkflowManager {
             "string" => Ok(json!(input)),
             "number" | "integer" => {
                 let num: f64 = input.parse()
-                    .map_err(|_| anyhow!("Invalid number"))?;
+                    .map_err(|e| anyhow!("Invalid number: {}", e))?;
                 Ok(json!(num))
             }
             "boolean" => {
@@ -765,7 +765,7 @@ impl WorkflowManager {
             if let Some(str_val) = value.as_str() {
                 let re = regex::Regex::new(pattern)?;
                 if !re.is_match(str_val) {
-                    return Err(anyhow!("Value does not match required pattern"));
+                    return Err(anyhow!("Value '{}' does not match required pattern '{}'", value, pattern.as_str()));
                 }
             }
         }

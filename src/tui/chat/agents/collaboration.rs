@@ -92,6 +92,15 @@ pub struct CollaborativeTask {
     pub context: HashMap<String, String>,
 }
 
+/// Coordination strategy for task execution
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum CoordinationStrategy {
+    Sequential,
+    Parallel,
+    Pipeline,
+    Consensus,
+}
+
 /// Result from collaborative execution
 #[derive(Debug, Clone)]
 pub struct CollaborationResult {
@@ -301,7 +310,8 @@ impl CollaborationCoordinator {
         
         // Select leader (highest performance score)
         let leader = agents.iter()
-            .max_by(|a, b| a.performance_score.partial_cmp(&b.performance_score).unwrap())
+            .max_by(|a, b| a.performance_score.partial_cmp(&b.performance_score)
+                .unwrap_or(std::cmp::Ordering::Equal))
             .ok_or_else(|| anyhow!("No agents available"))?;
         
         let mut contributions = Vec::new();
@@ -333,7 +343,8 @@ impl CollaborationCoordinator {
         // Leader synthesizes results
         let synthesis_context = HashMap::from([
             ("role".to_string(), "synthesize".to_string()),
-            ("contributions".to_string(), serde_json::to_string(&contributions).unwrap()),
+            ("contributions".to_string(), serde_json::to_string(&contributions)
+                .unwrap_or_else(|_| "[]".to_string())),
         ]);
         
         let leader_response = Self::simulate_agent_response_with_context(
@@ -400,7 +411,8 @@ impl CollaborationCoordinator {
         
         // Find winning proposal
         let winner_idx = votes.iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .max_by(|a, b| a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| *idx)
             .unwrap_or(0);
         
@@ -412,6 +424,268 @@ impl CollaborationCoordinator {
             result: winning_proposal.clone(),
             contributions,
             consensus_score,
+            execution_time_ms: 0,
+        })
+    }
+    
+    /// Assign task to specific agent
+    pub async fn assign_task_to_agent(
+        &self,
+        task: CollaborativeTask,
+        agent_id: String,
+    ) -> Result<()> {
+        let mut agents = self.active_agents.write().await;
+        let agent = agents.get_mut(&agent_id)
+            .ok_or_else(|| anyhow!("Agent {} not found", agent_id))?;
+        
+        if !agent.available {
+            return Err(anyhow!("Agent {} is not available", agent_id));
+        }
+        
+        // Update agent workload
+        agent.workload += task.priority;
+        agent.available = agent.workload < 1.0;
+        
+        // Add to task queue
+        self.task_queue.write().await.push(task);
+        
+        Ok(())
+    }
+    
+    /// Distribute tasks among available agents
+    pub async fn distribute_tasks(
+        &self,
+        tasks: Vec<CollaborativeTask>,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let config = self.config.read().await;
+        let mut task_assignments: HashMap<String, Vec<String>> = HashMap::new();
+        
+        for task in tasks {
+            let agents = self.select_agents(&task, &config).await?;
+            
+            if agents.is_empty() {
+                tracing::warn!("No agents available for task {}", task.id);
+                continue;
+            }
+            
+            // Assign based on load balancing strategy
+            let selected_agent = match config.load_balancing {
+                LoadBalancingStrategy::RoundRobin => &agents[0],
+                LoadBalancingStrategy::LeastLoaded => {
+                    agents.iter()
+                        .min_by(|a, b| a.workload.partial_cmp(&b.workload)
+                            .unwrap_or(std::cmp::Ordering::Equal))
+                        .unwrap()
+                }
+                LoadBalancingStrategy::PerformanceBased => {
+                    agents.iter()
+                        .max_by(|a, b| a.performance_score.partial_cmp(&b.performance_score)
+                            .unwrap_or(std::cmp::Ordering::Equal))
+                        .unwrap()
+                }
+                LoadBalancingStrategy::DynamicPriority => {
+                    // Higher priority tasks go to better performing agents
+                    if task.priority > 0.7 {
+                        agents.iter()
+                            .max_by(|a, b| a.performance_score.partial_cmp(&b.performance_score)
+                                .unwrap_or(std::cmp::Ordering::Equal))
+                            .unwrap()
+                    } else {
+                        &agents[0]
+                    }
+                }
+                LoadBalancingStrategy::CapabilityOptimal => {
+                    // Match based on required specializations
+                    agents.iter()
+                        .find(|a| task.required_specializations.contains(&a.specialization))
+                        .unwrap_or(&agents[0])
+                }
+                LoadBalancingStrategy::Random => {
+                    use rand::Rng;
+                    let mut rng = rand::thread_rng();
+                    &agents[rng.gen_range(0..agents.len())]
+                }
+                LoadBalancingStrategy::WeightedRoundRobin => {
+                    // For now, use simple round-robin
+                    &agents[0]
+                }
+            };
+            
+            task_assignments
+                .entry(selected_agent.id.clone())
+                .or_insert_with(Vec::new)
+                .push(task.id.clone());
+            
+            self.assign_task_to_agent(task, selected_agent.id.clone()).await?;
+        }
+        
+        Ok(task_assignments)
+    }
+    
+    /// Coordinate task execution across multiple agents
+    pub async fn coordinate_task_execution(
+        &self,
+        task_id: String,
+        agents: Vec<String>,
+        coordination_strategy: CoordinationStrategy,
+    ) -> Result<CollaborationResult> {
+        // Get task from queue
+        let task = {
+            let queue = self.task_queue.read().await;
+            queue.iter()
+                .find(|t| t.id == task_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("Task {} not found", task_id))?
+        };
+        
+        // Get agent infos
+        let agent_infos = {
+            let all_agents = self.active_agents.read().await;
+            agents.iter()
+                .filter_map(|id| all_agents.get(id).cloned())
+                .collect::<Vec<_>>()
+        };
+        
+        if agent_infos.is_empty() {
+            return Err(anyhow!("No valid agents found for coordination"));
+        }
+        
+        // Execute based on coordination strategy
+        let result = match coordination_strategy {
+            CoordinationStrategy::Sequential => {
+                self.execute_sequential(task, agent_infos).await?
+            }
+            CoordinationStrategy::Parallel => {
+                self.execute_parallel(task, agent_infos).await?
+            }
+            CoordinationStrategy::Pipeline => {
+                self.execute_pipeline(task, agent_infos).await?
+            }
+            CoordinationStrategy::Consensus => {
+                let config = self.config.read().await;
+                self.execute_democratic(task, &config).await?
+            }
+        };
+        
+        Ok(result)
+    }
+    
+    /// Execute task sequentially across agents
+    async fn execute_sequential(
+        &self,
+        task: CollaborativeTask,
+        agents: Vec<AgentInfo>,
+    ) -> Result<CollaborationResult> {
+        let mut contributions = Vec::new();
+        let mut cumulative_result = String::new();
+        
+        for agent in agents {
+            let response = Self::simulate_agent_response(&agent, &task).await;
+            cumulative_result.push_str(&format!("\n[{}]: {}", agent.id, response.content));
+            contributions.push(AgentContribution {
+                agent_id: agent.id.clone(),
+                response: response.content,
+                confidence: response.confidence,
+                reasoning: None,
+            });
+        }
+        
+        Ok(CollaborationResult {
+            task_id: task.id,
+            result: cumulative_result,
+            contributions,
+            consensus_score: 1.0,
+            execution_time_ms: 0,
+        })
+    }
+    
+    /// Execute task in parallel across agents
+    async fn execute_parallel(
+        &self,
+        task: CollaborativeTask,
+        agents: Vec<AgentInfo>,
+    ) -> Result<CollaborationResult> {
+        use tokio::task::JoinSet;
+        
+        let mut join_set = JoinSet::new();
+        let task_arc = Arc::new(task.clone());
+        
+        // Launch parallel executions
+        for agent in agents {
+            let task_clone = task_arc.clone();
+            join_set.spawn(async move {
+                let response = Self::simulate_agent_response(&agent, &task_clone).await;
+                (agent.id, response)
+            });
+        }
+        
+        // Collect results
+        let mut contributions = Vec::new();
+        let mut results = Vec::new();
+        
+        while let Some(result) = join_set.join_next().await {
+            if let Ok((agent_id, response)) = result {
+                results.push(response.content.clone());
+                contributions.push(AgentContribution {
+                    agent_id,
+                    response: response.content,
+                    confidence: response.confidence,
+                    reasoning: None,
+                });
+            }
+        }
+        
+        // Combine results
+        let combined_result = results.join("\n---\n");
+        
+        Ok(CollaborationResult {
+            task_id: task.id,
+            result: combined_result,
+            contributions,
+            consensus_score: 0.8,
+            execution_time_ms: 0,
+        })
+    }
+    
+    /// Execute task as a pipeline across agents
+    async fn execute_pipeline(
+        &self,
+        task: CollaborativeTask,
+        agents: Vec<AgentInfo>,
+    ) -> Result<CollaborationResult> {
+        let mut contributions = Vec::new();
+        let mut pipeline_state = task.context.clone();
+        let mut current_output = String::new();
+        
+        for (i, agent) in agents.iter().enumerate() {
+            // Add previous output to context
+            if i > 0 {
+                pipeline_state.insert("previous_output".to_string(), current_output.clone());
+            }
+            
+            let response = Self::simulate_agent_response_with_context(
+                &agent,
+                &task,
+                &pipeline_state,
+            ).await;
+            
+            current_output = response.content.clone();
+            contributions.push(AgentContribution {
+                agent_id: agent.id.clone(),
+                response: response.content,
+                confidence: response.confidence,
+                reasoning: None,
+            });
+            
+            // Update pipeline state
+            pipeline_state.insert(format!("stage_{}_output", i), current_output.clone());
+        }
+        
+        Ok(CollaborationResult {
+            task_id: task.id,
+            result: current_output,
+            contributions,
+            consensus_score: 0.9,
             execution_time_ms: 0,
         })
     }
@@ -446,7 +720,8 @@ impl CollaborationCoordinator {
             }
             LoadBalancingStrategy::LeastLoaded => {
                 // Sort by workload
-                eligible.sort_by(|a, b| a.workload.partial_cmp(&b.workload).unwrap());
+                eligible.sort_by(|a, b| a.workload.partial_cmp(&b.workload)
+                    .unwrap_or(std::cmp::Ordering::Equal));
                 eligible.truncate(config.max_agents);
             }
             LoadBalancingStrategy::CapabilityOptimal => {
@@ -461,13 +736,15 @@ impl CollaborationCoordinator {
                 eligible.sort_by(|a, b| {
                     let a_score = a.performance_score / (1.0 + a.workload);
                     let b_score = b.performance_score / (1.0 + b.workload);
-                    b_score.partial_cmp(&a_score).unwrap()
+                    b_score.partial_cmp(&a_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
                 eligible.truncate(config.max_agents);
             }
             LoadBalancingStrategy::PerformanceBased => {
                 // Sort by performance score
-                eligible.sort_by(|a, b| b.performance_score.partial_cmp(&a.performance_score).unwrap());
+                eligible.sort_by(|a, b| b.performance_score.partial_cmp(&a.performance_score)
+                    .unwrap_or(std::cmp::Ordering::Equal));
                 eligible.truncate(config.max_agents);
             }
             LoadBalancingStrategy::Random => {
@@ -479,7 +756,8 @@ impl CollaborationCoordinator {
             }
             LoadBalancingStrategy::WeightedRoundRobin => {
                 // Weight by performance score
-                eligible.sort_by(|a, b| b.performance_score.partial_cmp(&a.performance_score).unwrap());
+                eligible.sort_by(|a, b| b.performance_score.partial_cmp(&a.performance_score)
+                    .unwrap_or(std::cmp::Ordering::Equal));
                 eligible.truncate(config.max_agents);
             }
         }
@@ -574,9 +852,12 @@ mod tests {
         });
         
         // Register agents
-        coordinator.register_agent("agent1".to_string(), AgentSpecialization::Analytical).await.unwrap();
-        coordinator.register_agent("agent2".to_string(), AgentSpecialization::Creative).await.unwrap();
-        coordinator.register_agent("agent3".to_string(), AgentSpecialization::Technical).await.unwrap();
+        coordinator.register_agent("agent1".to_string(), AgentSpecialization::Analytical).await
+            .expect("Failed to register agent1");
+        coordinator.register_agent("agent2".to_string(), AgentSpecialization::Creative).await
+            .expect("Failed to register agent2");
+        coordinator.register_agent("agent3".to_string(), AgentSpecialization::Technical).await
+            .expect("Failed to register agent3");
         
         // Create task
         let task = CollaborativeTask {
@@ -588,7 +869,8 @@ mod tests {
         };
         
         // Execute
-        let result = coordinator.execute_task(task).await.unwrap();
+        let result = coordinator.execute_task(task).await
+            .expect("Failed to execute collaborative task");
         assert!(!result.contributions.is_empty());
         assert!(!result.result.is_empty());
     }

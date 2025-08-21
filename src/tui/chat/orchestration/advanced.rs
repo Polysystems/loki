@@ -286,6 +286,97 @@ struct ModelProfile {
 }
 
 impl AdvancedOrchestrator {
+    /// Calculate cost based on model and token count
+    fn calculate_cost(model_id: &str, content: &str) -> f64 {
+        // Estimate token count (rough approximation: ~4 chars per token)
+        let estimated_tokens = content.len() as f64 / 4.0;
+        
+        // Cost per 1K tokens based on model (in dollars)
+        let cost_per_1k = match model_id {
+            // OpenAI pricing
+            "gpt-4-turbo" | "gpt-4-turbo-preview" => 0.01,  // $0.01 per 1K tokens
+            "gpt-4" => 0.03,                                  // $0.03 per 1K tokens
+            "gpt-4-32k" => 0.06,                              // $0.06 per 1K tokens
+            "gpt-3.5-turbo" => 0.0005,                       // $0.0005 per 1K tokens
+            
+            // Anthropic pricing
+            "claude-3-opus" => 0.015,                        // $0.015 per 1K tokens
+            "claude-3-sonnet" => 0.003,                      // $0.003 per 1K tokens
+            "claude-3-haiku" => 0.00025,                     // $0.00025 per 1K tokens
+            "claude-2.1" => 0.008,                           // $0.008 per 1K tokens
+            
+            // Google pricing
+            "gemini-pro" => 0.00025,                         // $0.00025 per 1K tokens
+            "gemini-pro-vision" => 0.00025,                  // $0.00025 per 1K tokens
+            
+            // Mistral pricing
+            "mistral-large" => 0.002,                        // $0.002 per 1K tokens
+            "mistral-medium" => 0.0027,                      // $0.0027 per 1K tokens
+            "mistral-small" => 0.0002,                       // $0.0002 per 1K tokens
+            
+            // Local/Ollama models (no cost)
+            _ if model_id.contains("llama") || model_id.contains("ollama") => 0.0,
+            
+            // Default for unknown models
+            _ => 0.001,
+        };
+        
+        // Calculate actual cost
+        (estimated_tokens / 1000.0) * cost_per_1k
+    }
+    
+    /// Calculate quality score based on response characteristics
+    fn calculate_quality_score(content: &str, latency_ms: f64) -> f64 {
+        let mut score = 0.0;
+        
+        // Content length factor (longer, more detailed responses score higher)
+        let length_score = (content.len() as f64 / 1000.0).min(1.0) * 0.3;
+        score += length_score;
+        
+        // Structure factor (responses with formatting score higher)
+        let structure_score = if content.contains('\n') && content.contains("- ") {
+            0.2
+        } else if content.contains('\n') {
+            0.1
+        } else {
+            0.0
+        };
+        score += structure_score;
+        
+        // Completeness factor (responses with punctuation score higher)
+        let completeness_score = if content.ends_with('.') || content.ends_with('!') || content.ends_with('?') {
+            0.2
+        } else {
+            0.0
+        };
+        score += completeness_score;
+        
+        // Response time factor (faster responses score higher, up to 0.3)
+        let speed_score = if latency_ms < 500.0 {
+            0.3
+        } else if latency_ms < 1000.0 {
+            0.2
+        } else if latency_ms < 2000.0 {
+            0.1
+        } else {
+            0.0
+        };
+        score += speed_score;
+        
+        // Code detection (responses with code blocks score higher for technical queries)
+        let code_score = if content.contains("```") {
+            0.2
+        } else if content.contains("    ") || content.contains("\t") {
+            0.1
+        } else {
+            0.0
+        };
+        score += code_score;
+        
+        // Ensure score is between 0.0 and 1.0
+        score.min(1.0).max(0.0)
+    }
+    
     /// Create a new advanced orchestrator
     pub async fn new(config: OrchestrationConfig) -> Result<Self> {
         let mut strategies: HashMap<String, Box<dyn OrchestrationStrategy>> = HashMap::new();
@@ -441,12 +532,13 @@ impl OrchestrationStrategy for ParallelStrategy {
             match handle.await {
                 Ok((model_id, result, latency_ms)) => {
                 if let Ok(response) = result {
+                    let content = response.content.clone();
                     model_responses.push(ModelResponse {
-                        model_id,
-                        response: response.content,
+                        model_id: model_id.clone(),
+                        response: content.clone(),
                         latency_ms,
-                        cost: 0.001, // TODO: Calculate actual cost
-                        quality_score: 0.8, // TODO: Calculate quality
+                        cost: AdvancedOrchestrator::calculate_cost(&model_id, &content),
+                        quality_score: AdvancedOrchestrator::calculate_quality_score(&content, latency_ms as f64),
                         confidence: 0.85,
                     });
                 }

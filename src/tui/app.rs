@@ -16,13 +16,13 @@ use crate::auth::{AuthConfig, AuthSystem, SessionContext as AuthSessionContext};
 use crate::cluster::ClusterManager;
 use crate::cognitive::{CognitiveConfig, CognitiveSystem};
 use crate::compute::ComputeManager;
-use crate::config::{Config, XTwitterConfig, ApiKeysConfig};
+use crate::config::{Config, XTwitterConfig};
 use crate::models::{ModelOrchestrator, MultiAgentOrchestrator};
 use crate::safety::ActionValidator;
 use crate::social::x_client::{XClient, XConfig};
 use crate::streaming::StreamManager;
 use crate::tools::IntelligentToolManager;
-use crate::tools::mcp_client::{McpClient, McpClientConfig};
+use crate::mcp::{McpClient, McpClientConfig};
 use crate::tools::task_management::{TaskConfig, TaskManager};
 use crate::tui::run::{AssistantResponseType, parse_loki_artifacts};
 use crate::plugins::{PluginManager, PluginConfig};
@@ -43,7 +43,6 @@ use crate::tui::bridges::UnifiedBridge;
 
 // Import from the correct modules
 // use crate::cognitive::agents::{AgentSpecialization, LoadBalancingStrategy};
-use crate::tui::chat::{ActiveModel, CollaborationMode, OrchestrationSetup};
 
 /// Main TUI application struct that manages all UI state and interactions
 pub struct App {
@@ -284,7 +283,7 @@ impl App {
             None, // monitoring_system - legacy, we use real_time_aggregator now
             real_time_metrics_aggregator.clone(), // Pass the real-time metrics aggregator
             None, // health_monitor - will implement later
-            action_validator.clone(),
+            action_validator.clone().map(|v| v as Arc<dyn std::any::Any + Send + Sync>),
             cognitive_system.clone(),
             cognitive_system.as_ref().map(|c| c.memory().clone()), // Connect memory system
             plugin_manager.clone(), // Connect plugin manager
@@ -293,7 +292,7 @@ impl App {
                     .or_else(|| dirs::cache_dir())
                     .unwrap_or_else(|| std::env::temp_dir())
                     .join("loki")
-                    .join("daemon.sock"),
+                    .join("loki.sock"),
             ))),
             None, // natural_language_orchestrator - will be initialized later when chat manager is created
         );
@@ -306,6 +305,31 @@ impl App {
                 debug!("Failed to update utilities cache: {}", e);
             }
         }
+        
+        // Initialize TodoManager for chat orchestration
+        let todo_manager = if let Some(task_mgr) = &task_manager {
+            // Create basic PipelineOrchestrator and ModelCallTracker
+            // These will be properly initialized when orchestration is set up
+            let pipeline_orchestrator = Arc::new(
+                crate::tui::chat::orchestration::pipeline::PipelineOrchestrator::new()
+            );
+            let call_tracker = Arc::new(
+                crate::tui::chat::orchestration::tracking::ModelCallTracker::new()
+            );
+            
+            // Create TodoManager for use in chat
+            let manager = Arc::new(
+                crate::tui::chat::orchestration::todo_manager::TodoManager::new(
+                    pipeline_orchestrator,
+                    call_tracker,
+                )
+            );
+            
+            info!("✅ Todo management system initialized for chat");
+            Some(manager)
+        } else {
+            None
+        };
 
         // Initialize chat orchestration with all available systems
         let memory_system = cognitive_system.as_ref().map(|c| c.memory().clone());
@@ -332,6 +356,39 @@ impl App {
             warn!("Failed to initialize chat memory: {}", e);
         }
 
+        // Wire story engine and tool discovery to IntelligentToolManager
+        if let (Some(tool_mgr), Some(story_eng)) = (&tool_manager, &story_engine) {
+            // Wire the components through the existing methods
+            tool_mgr.wire_story_engine(story_eng.clone()).await;
+            
+            // Wire emergent engine with fully implemented components
+            match crate::tools::intelligent_manager::EmergentToolUsageEngine::new().await {
+                Ok(emergent_engine) => {
+                    tool_mgr.wire_emergent_engine(Arc::new(emergent_engine)).await;
+                    info!("✅ Emergent tool usage engine wired to IntelligentToolManager");
+                }
+                Err(e) => {
+                    warn!("Failed to create emergent engine: {}", e);
+                }
+            }
+            
+            // Create and wire tool discovery engine
+            let mut tool_discovery = crate::tui::chat::tools::discovery::ToolDiscoveryEngine::new();
+            if let Err(e) = tool_discovery.initialize(tool_mgr.clone()).await {
+                warn!("Failed to initialize tool discovery: {}", e);
+            } else {
+                tool_mgr.wire_tool_discovery(Arc::new(tool_discovery)).await;
+                info!("✅ Tool discovery engine wired to IntelligentToolManager");
+                
+                // Discover and register tools
+                if let Err(e) = tool_mgr.discover_and_register_tools().await {
+                    warn!("Failed to discover tools: {}", e);
+                } else {
+                    info!("✅ Tools discovered and registered");
+                }
+            }
+        }
+        
         // Set story engine if available
         if let Some(story_engine) = &story_engine {
             state.chat.set_story_engine(story_engine.clone());
@@ -409,6 +466,10 @@ impl App {
         info!("Initializing event bus and shared state...");
         let event_bus = Arc::new(EventBus::new(1000)); // 1000 event history
         let mut shared_state = SharedSystemState::new(event_bus.clone());
+        
+        // Connect EventBus to StreamManager for real-time data broadcasting
+        stream_manager.set_event_bus(event_bus.clone()).await;
+        info!("✅ EventBus connected to StreamManager for real-time data broadcasting");
         
         // Initialize unified bridge system
         info!("Initializing unified bridge system...");
@@ -613,7 +674,7 @@ impl App {
             let task_config = TaskConfig::default();
             let memory = cognitive.memory().clone();
 
-            match TaskManager::new(task_config, cognitive.clone(), memory, None).await {
+            match TaskManager::new_with_components(task_config, cognitive.clone(), memory, None).await {
                 Ok(manager) => Some(Arc::new(manager)),
                 Err(e) => {
                     warn!("Failed to initialize task manager: {}", e);
@@ -628,8 +689,13 @@ impl App {
     /// Initialize MCP client
     async fn initialize_mcp_client(_config: &Config) -> Option<Arc<McpClient>> {
         let mcp_config = McpClientConfig::default();
-        let client = McpClient::new(mcp_config);
-        Some(Arc::new(client))
+        match McpClient::new_with_standardconfig(mcp_config).await {
+            Ok(client) => Some(Arc::new(client)),
+            Err(e) => {
+                tracing::warn!("Failed to initialize MCP client: {}", e);
+                None
+            }
+        }
     }
 
     /// Initialize plugin manager
@@ -1107,8 +1173,11 @@ impl App {
             
             // Forward keyboard input to active subtab when in Chat view (except for Chat subtab itself)
             // This handles Editor, Models, History, Settings, Orchestration, Agents, CLI, and Statistics tabs
-            _ if matches!(self.state.current_view, ViewState::Chat) && self.state.chat_tabs.current_index != 0 => {
-                // Forward all input to the active subtab (Editor is 1, Models is 2, etc.)
+            // BUT: Don't forward navigation keys - they should be handled globally
+            _ if matches!(self.state.current_view, ViewState::Chat) 
+                && self.state.chat_tabs.current_index != 0 
+                && !self.is_navigation_key(&key) => {
+                // Forward non-navigation keys to the active subtab (Editor is 1, Models is 2, etc.)
                 tracing::debug!("Forwarding key to subtab {}: {:?}", self.state.chat_tabs.current_index, key);
                 if let Err(e) = self.state.chat.subtab_manager.borrow_mut().handle_input(key) {
                     tracing::error!("Subtab {} input error: {}", self.state.chat_tabs.current_index, e);
@@ -1133,7 +1202,14 @@ impl App {
                         tracing::debug!("Switched to subtab {} in modular system", self.state.chat_tabs.current_index);
                     }
                 }
-                ViewState::Utilities => self.state.utilities_tabs.next(),
+                ViewState::Utilities => {
+                    // Update old system for compatibility
+                    self.state.utilities_tabs.next();
+                    // Synchronize the modular utilities system with the same index
+                    let new_index = self.state.utilities_tabs.current_index;
+                    self.state.utilities_manager.subtab_manager.get_mut().switch_tab(new_index);
+                    tracing::debug!("Switched to utilities subtab index: {}", new_index);
+                }
                 ViewState::Memory => self.state.memory_tabs.next(),
                 ViewState::Cognitive => self.state.cognitive_tabs.next(),
                 ViewState::Streams => self.state.social_tabs.next(),
@@ -1152,7 +1228,14 @@ impl App {
                         tracing::debug!("Switched to subtab {} in modular system", self.state.chat_tabs.current_index);
                     }
                 }
-                ViewState::Utilities => self.state.utilities_tabs.previous(),
+                ViewState::Utilities => {
+                    // Update old system for compatibility
+                    self.state.utilities_tabs.previous();
+                    // Synchronize the modular utilities system with the same index
+                    let new_index = self.state.utilities_tabs.current_index;
+                    self.state.utilities_manager.subtab_manager.get_mut().switch_tab(new_index);
+                    tracing::debug!("Switched to utilities subtab index: {}", new_index);
+                }
                 ViewState::Memory => self.state.memory_tabs.previous(),
                 ViewState::Cognitive => self.state.cognitive_tabs.previous(),
                 ViewState::Streams => self.state.social_tabs.previous(),
@@ -1217,10 +1300,10 @@ impl App {
                             }
                             // View cognitive logs
                             (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                                // Switch to utilities tab logs view
+                                // Switch to utilities tab plugins view (logs removed)
                                 self.state.current_view = ViewState::Utilities;
-                                self.state.utilities_tabs.current_index = 2; // Logs tab
-                                self.add_notification(crate::tui::ui::NotificationType::Info, "View Changed", "Switched to logs view");
+                                self.state.utilities_tabs.current_index = 2; // Plugins tab
+                                self.add_notification(crate::tui::ui::NotificationType::Info, "View Changed", "Switched to plugins view");
                             }
                             _ => {}
                         }
@@ -1230,11 +1313,13 @@ impl App {
             }
 
             // Handle keys for tools management tab in utilities view
-            (key, _modifiers)
+            (key, modifiers)
             if self.state.current_view == ViewState::Utilities
                 && self.state.utilities_tabs.current_index == 0
                 && key != KeyCode::Tab
-                && key != KeyCode::BackTab => // Don't handle Tab/BackTab keys here
+                && key != KeyCode::BackTab
+                && !(key == KeyCode::Char('j') && modifiers.contains(KeyModifiers::CONTROL))
+                && !(key == KeyCode::Char('k') && modifiers.contains(KeyModifiers::CONTROL)) => // Don't handle Tab/BackTab/Ctrl+J/Ctrl+K keys here
                 {
                     if let Err(e) = self.state.utilities_manager.handle_tools_input(key).await {
                         self.add_notification(
@@ -1246,11 +1331,13 @@ impl App {
                 }
 
             // Handle keys for MCP management tab in utilities view
-            (key, _modifiers)
+            (key, modifiers)
             if self.state.current_view == ViewState::Utilities
                 && self.state.utilities_tabs.current_index == 1
                 && key != KeyCode::Tab
-                && key != KeyCode::BackTab => // Don't handle Tab/BackTab keys here
+                && key != KeyCode::BackTab
+                && !(key == KeyCode::Char('j') && modifiers.contains(KeyModifiers::CONTROL))
+                && !(key == KeyCode::Char('k') && modifiers.contains(KeyModifiers::CONTROL)) => // Don't handle Tab/BackTab/Ctrl+J/Ctrl+K keys here
                 {
                     if let Err(e) = self.state.utilities_manager.handle_mcp_input(key).await {
                         self.add_notification(
@@ -1262,11 +1349,13 @@ impl App {
                 }
 
             // Handle keys for daemon management tab in utilities view
-            (key, _modifiers)
+            (key, modifiers)
             if self.state.current_view == ViewState::Utilities
-                && self.state.utilities_tabs.current_index == 4
+                && self.state.utilities_tabs.current_index == 3
                 && key != KeyCode::Tab
-                && key != KeyCode::BackTab => // Don't handle Tab/BackTab keys here
+                && key != KeyCode::BackTab
+                && !(key == KeyCode::Char('j') && modifiers.contains(KeyModifiers::CONTROL))
+                && !(key == KeyCode::Char('k') && modifiers.contains(KeyModifiers::CONTROL)) => // Don't handle Tab/BackTab/Ctrl+J/Ctrl+K keys here
                 {
                     if let Err(e) = self.state.utilities_manager.handle_daemon_input(key).await {
                         self.add_notification(
@@ -1278,11 +1367,13 @@ impl App {
                 }
 
             // Handle keys for plugins management tab in utilities view
-            (key, _modifiers)
+            (key, modifiers)
             if self.state.current_view == ViewState::Utilities
                 && self.state.utilities_tabs.current_index == 2
                 && key != KeyCode::Tab
-                && key != KeyCode::BackTab => // Don't handle Tab/BackTab keys here
+                && key != KeyCode::BackTab
+                && !(key == KeyCode::Char('j') && modifiers.contains(KeyModifiers::CONTROL))
+                && !(key == KeyCode::Char('k') && modifiers.contains(KeyModifiers::CONTROL)) => // Don't handle Tab/BackTab/Ctrl+J/Ctrl+K keys here
                 {
                     if let Err(e) = self.state.utilities_manager.handle_plugins_input(key).await {
                         self.add_notification(
@@ -1293,21 +1384,7 @@ impl App {
                     }
                 }
 
-            // Handle keys for monitoring tab in utilities view
-            (key, _modifiers)
-            if self.state.current_view == ViewState::Utilities
-                && self.state.utilities_tabs.current_index == 3
-                && key != KeyCode::Tab
-                && key != KeyCode::BackTab => // Don't handle Tab/BackTab keys here
-                {
-                    if let Err(e) = self.state.utilities_manager.handle_monitoring_input(key).await {
-                        self.add_notification(
-                            crate::tui::ui::NotificationType::Error,
-                            "Monitoring Control Failed",
-                            &format!("Failed to execute monitoring command: {}", e),
-                        );
-                    }
-                }
+            // Monitoring tab removed - no longer handling index 3 for monitoring
 
             // Handle keys for Settings view (ViewState::Models)
             (KeyCode::Up, _) if matches!(self.state.current_view, ViewState::Models) && self.state.settings_tabs.current_key() == Some("general") => {
@@ -1868,17 +1945,6 @@ impl App {
             (KeyCode::Backspace, _) if matches!(self.state.current_view, ViewState::Memory) && self.state.memory_tabs.current_key() == Some("storage") && self.state.storage_password_mode => {
                 // Delete password character
                 self.state.storage_password_input.pop();
-            }
-            (KeyCode::Esc, _) if matches!(self.state.current_view, ViewState::Memory) && self.state.memory_tabs.current_key() == Some("storage") && (self.state.storage_password_mode || self.state.api_key_input_mode || self.state.chat_search_mode) => {
-                // Cancel current input mode
-                self.state.storage_password_mode = false;
-                self.state.api_key_input_mode = false;
-                self.state.chat_search_mode = false;
-                self.state.storage_password_input.clear();
-                self.state.api_key_provider_input.clear();
-                self.state.api_key_value_input.clear();
-                self.state.chat_search_query.clear();
-                self.state.storage_operation_message = Some("Operation cancelled".to_string());
             }
             
             // Handle stories tab key bindings
@@ -2545,6 +2611,7 @@ impl App {
                                             prefer_local: false,
                                             require_streaming: false,
                                             required_capabilities: vec![],
+                                            task_hint: None,
                                             creativity_level: Some(0.7),
                                             formality_level: None,
                                             target_audience: None,
@@ -3065,51 +3132,6 @@ impl App {
                         }
                         return Ok(());
                     }
-
-                    // Fallback to old system
-                    match self.state.chat_tabs.current_index {
-                        0 => {
-                            // Main chat tab - use handle_backspace for chat input
-                            self.handle_backspace();
-                        }
-                        1 => {
-                            // Models tab backspace - handled by modular system
-                        }
-                        2 => {
-                            let chat_ids = self.state.chat.get_chat_ids_sorted();
-                            // Access history manager's selected index
-                            let selected_idx = tokio::task::block_in_place(|| {
-                                let rt = tokio::runtime::Handle::current();
-                                rt.block_on(async {
-                                    self.state.chat.history_manager.read().await.selected_index
-                                })
-                            });
-                            if selected_idx < chat_ids.len() {
-                                if let Some(&chat_id) = chat_ids.get(selected_idx) {
-                                    let _ = self.state.chat.delete_chat(chat_id);
-                                    // Update selected index to stay in bounds
-                                    tokio::task::block_in_place(|| {
-                                        let rt = tokio::runtime::Handle::current();
-                                        rt.block_on(async {
-                                            let mut history = self.state.chat.history_manager.write().await;
-                                            if history.selected_index >= chat_ids.len() && history.selected_index > 0 {
-                                                history.selected_index -= 1;
-                                            }
-                                        })
-                                    });
-                                }
-                            }
-                        }
-                        3 => {}
-                        6 => {
-                            // CLI tab
-                            self.state.chat.command_input.pop();
-                        }
-                        _ => {
-                            // Other chat tabs
-                            self.handle_backspace();
-                        }
-                    };
                 } else if matches!(self.state.current_view, ViewState::Streams) {
                     match self.state.social_tabs.current_index {
                         0 => {
@@ -6784,6 +6806,29 @@ impl App {
             return self.state.chat.subtab_manager.borrow().is_chat_input_active();
         }
         false
+    }
+    
+    /// Check if a key event is a navigation key that should be handled globally
+    fn is_navigation_key(&self, key: &KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        
+        match (key.code, key.modifiers) {
+            // Subtab navigation
+            (KeyCode::Char('j'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => true,
+            (KeyCode::Char('k'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => true,
+            
+            // Tab navigation
+            (KeyCode::Tab, modifiers) if !modifiers.contains(KeyModifiers::CONTROL) => true,
+            (KeyCode::BackTab, _) => true,
+            
+            // View switching (number keys)
+            (KeyCode::Char('1'..='9'), modifiers) if modifiers.is_empty() && !self.is_chat_input_active() => true,
+            
+            // Alt+Left/Right for alternative subtab navigation
+            (KeyCode::Left | KeyCode::Right, modifiers) if modifiers.contains(KeyModifiers::ALT) => true,
+            
+            _ => false,
+        }
     }
 
     /// Check if the modular chat system should handle keyboard events

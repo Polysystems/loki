@@ -1334,7 +1334,7 @@ impl CognitiveDependencyContainer {
         let config = self.configurations.read().toolconfig.clone().unwrap_or_default();
 
         let tool_manager = Arc::new(
-            IntelligentToolManager::new(character, memory, safety_validator, config).await?,
+            IntelligentToolManager::new_with_components(character, memory, safety_validator, config).await?,
         );
 
         self.services.write().tool_manager = Some(tool_manager.clone());

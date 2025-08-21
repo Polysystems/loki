@@ -804,7 +804,7 @@ impl MemoryEmergenceEngine {
 
     /// Calculate group complexity
     async fn calculate_group_complexity(&self, group: &[Arc<FractalMemoryNode>]) -> Result<f64> {
-        let mut total_complexity = 0.0;
+        let total_complexity = 0.0;
 
         let avg_complexity = total_complexity / group.len() as f64;
 
@@ -1085,7 +1085,6 @@ impl MemoryEmergenceEngine {
         tasks: Vec<ClusteringTask>,
         representatives_per_cluster: usize
     ) -> Result<Vec<ClusteringResult>> {
-        use tokio::sync::Semaphore;
         let results = Vec::new();
         Ok(results)
     }

@@ -4,7 +4,7 @@
 //! coordination, including validation of collective decisions, monitoring
 //! of emergent behaviors, and enforcement of agent-specific permissions.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

@@ -4,7 +4,6 @@ pub mod doc_crawler;
 pub mod file_system;
 pub mod github;
 pub mod graphql;
-pub mod mcp_client;
 pub mod web_search;
 pub mod websocket;
 pub mod computer_use;
@@ -134,46 +133,10 @@ pub use metrics_collector::{
     SystemMetrics,
     TuiToolMetrics,
 };
-pub use mcp_client::{
-    McpCapabilities,
-    McpClient,
-    McpClientConfig,
-    McpServer,
-    McpServerInfo,
-    McpTool,
-    McpToolCall,
-    McpToolResponse,
-};
 // Enhanced tools exports
 pub use slack::{SlackClient, SlackConfig, SlackEvent, SlackMessage, SlackStats};
 pub use task_management::{Task, TaskConfig, TaskEvent, TaskManager, TaskStats, WorkloadAnalysis};
 
-/// Create a pre-configured MCP client with standard configuration
-///
-/// This function creates an MCP client and automatically loads configuration
-/// from standard locations in this order:
-/// 1. ~/.eigencode/mcp-servers/mcp-config-multi.json (Loki standard)
-/// 2. ~/.cursor/mcp.json (Cursor IDE)
-/// 3. ~/Library/Application Support/Claude/claude_desktopconfig.json (Claude
-///    Desktop)
-///
-/// # Returns
-/// A configured MCP client ready for use, or an error if initialization fails
-///
-/// # Example
-/// ```rust
-/// let mcp_client = create_standard_mcp_client().await?;
-/// let dirs = mcp_client.list_directory("/Users/thermo/Documents/GitHub/").await?;
-/// ```
-pub async fn create_standard_mcp_client() -> anyhow::Result<McpClient> {
-    let config = McpClientConfig::default();
-    McpClient::new_with_standardconfig(config).await
-}
-
-/// Convenience alias for create_standard_mcp_client
-pub async fn create_mcp_client() -> anyhow::Result<McpClient> {
-    create_standard_mcp_client().await
-}
 
 pub use emergent_types::*;
 pub use vector_memory::{

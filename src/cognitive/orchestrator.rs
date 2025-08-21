@@ -30,7 +30,6 @@ use crate::cognitive::theory_of_mind::{AgentId, TheoryOfMind};
 use crate::cognitive::thermodynamic_cognition::{ThermodynamicConfig, ThermodynamicProcessor};
 use crate::cognitive::{
     AttentionFilter,
-    DecisionOption,
     Goal,
     GoalId,
     GoalManager,
@@ -41,7 +40,6 @@ use crate::cognitive::{
     ThoughtId,
     ThoughtMetadata,
     ThoughtType,
-    decision_engine,
 };
 use crate::memory::simd_cache::SimdSmartCache;
 use crate::memory::{CognitiveMemory, MemoryMetadata};
@@ -308,6 +306,14 @@ struct IntegratedMentalState {
     attention_targets: usize,
     active_goals: usize,
     social_engagement: bool,
+}
+
+/// Response from cognitive processing with story context
+#[derive(Clone, Debug)]
+pub struct CognitiveResponse {
+    pub thought: Thought,
+    pub story_influenced: bool,
+    pub narrative_continuation: Option<String>,
 }
 
 /// Comprehensive context for creative synthesis
@@ -649,14 +655,7 @@ impl CognitiveOrchestrator {
                 Arc::new(emotional_core.clone()),
                 memory.clone(),
                 Arc::new(rt.block_on(LokiCharacter::new(memory.clone())).unwrap()),  // character
-                Arc::new(rt.block_on(IntelligentToolManager::new(
-                    Arc::new(rt.block_on(LokiCharacter::new(memory.clone())).unwrap()),
-                    memory.clone(),
-                    Arc::new(rt.block_on(ActionValidator::new(
-                        crate::safety::validator::ValidatorConfig::default()
-                    )).unwrap()),
-                    crate::tools::ToolManagerConfig::default()
-                )).unwrap()),  // tool manager
+                Arc::new(IntelligentToolManager::new()),  // tool manager
                 Arc::new(rt.block_on(ActionValidator::new(
                     crate::safety::validator::ValidatorConfig::default()
                 )).unwrap()),  // safety validator
@@ -4405,6 +4404,12 @@ impl CognitiveOrchestrator {
         chains
     }
     
+    /// Get cognitive metrics
+    pub async fn get_cognitive_metrics(&self) -> CognitiveMetrics {
+        let metrics = self.metrics.read().await;
+        metrics.clone()
+    }
+    
     /// Get learning metrics
     pub async fn get_learning_metrics(&self) -> LearningMetrics {
         let stats = self.stats.read().await;
@@ -4430,6 +4435,191 @@ impl CognitiveOrchestrator {
             knowledge_retention: 0.85, // Placeholder - would need memory metrics
             adaptation_speed: metrics.processing_efficiency,
         }
+    }
+    
+    /// Integrate story-driven cognitive processing
+    pub async fn process_with_story_context(&self, input: &str) -> Result<CognitiveResponse> {
+        // Get story context if available
+        let story_context = if let Some(ref story_engine) = self.story_engine {
+            Some(story_engine.get_current_context().await?.into())
+        } else {
+            None
+        };
+        
+        // Process input with story awareness
+        let thought = self.generate_thought_with_context(input, story_context.clone()).await?;
+        
+        // Update story if engine is available
+        let narrative_continuation = story_context.as_ref().map(|c| c.current_plot.clone());
+        
+        if let Some(ref story_engine) = self.story_engine {
+            if let Some(context) = story_context.as_ref() {
+                // Add cognitive event to story
+                let plot_type = crate::story::PlotType::Reasoning {
+                    premise: input.to_string(),
+                    conclusion: thought.content.clone(),
+                    confidence: 0.8,
+                };
+                
+                story_engine.add_plot_point(
+                    context.story_id,
+                    plot_type,
+                    vec!["cognitive".to_string()],
+                ).await?;
+            }
+        }
+        
+        Ok(CognitiveResponse {
+            thought,
+            story_influenced: story_context.is_some(),
+            narrative_continuation,
+        })
+    }
+    
+    /// Generate thought with story context
+    async fn generate_thought_with_context(
+        &self,
+        input: &str,
+        story_context: Option<crate::story::StoryContext>,
+    ) -> Result<Thought> {
+        // Create base thought
+        let mut thought = Thought {
+            id: ThoughtId(uuid::Uuid::new_v4().to_string()),
+            content: input.to_string(),
+            thought_type: ThoughtType::Reasoning,
+            metadata: ThoughtMetadata {
+                source: "story-driven".to_string(),
+                confidence: 0.8,
+                emotional_valence: 0.0,
+                importance: 0.8,
+                tags: Vec::new(),
+            },
+            parent: None,
+            children: Vec::new(),
+            timestamp: Instant::now(),
+        };
+        
+        // Enhance with story context
+        if let Some(context) = story_context {
+            thought.metadata.tags.push(format!("story:{}", context.story_id.0));
+            thought.metadata.tags.push(format!("narrative:{}", context.narrative));
+            
+            // Adjust emotional valence based on story mood
+            if let Some(arc) = &context.active_arc {
+                thought.metadata.emotional_valence = match arc.title.to_lowercase().as_str() {
+                    "conflict" => -0.3,
+                    "resolution" => 0.5,
+                    "climax" => 0.8,
+                    _ => 0.0,
+                };
+            }
+        }
+        
+        // Process through neural processor
+        let processed = self.neural_processor.process_thought(&thought).await?;
+        
+        // Store in active thoughts
+        self.active_thoughts.write().await.insert(thought.id.clone(), thought.clone());
+        
+        // Send event
+        let _ = self.event_tx.send(CognitiveEvent::ThoughtGenerated(thought.clone()));
+        
+        Ok(thought)
+    }
+    
+    /// Create story-driven goal
+    pub async fn create_story_goal(&self, objective: &str) -> Result<GoalId> {
+        let goal_id = GoalId::new();
+        
+        let goal = Goal {
+            id: goal_id.clone(),
+            name: objective.to_string(),
+            description: format!("Story-driven goal: {}", objective),
+            goal_type: GoalType::Achievement,
+            state: GoalState::Active,
+            priority: crate::cognitive::goal_manager::Priority::High,
+            parent: None,
+            children: Vec::new(),
+            dependencies: Vec::new(),
+            progress: 0.0,
+            target_completion: Some(Instant::now() + Duration::from_secs(3600)),
+            actual_completion: None,
+            created_at: Instant::now(),
+            last_updated: Instant::now(),
+            success_criteria: vec![],
+            resources_required: ResourceRequirements {
+                cognitive_load: 0.5,
+                emotional_energy: 0.3,
+                ..Default::default()
+            },
+            emotional_significance: 0.7,
+        };
+        
+        // Store goal
+        self.active_goals.write().await.insert(goal_id.clone(), goal.clone());
+        
+        // Add to story if engine available
+        if let Some(ref story_engine) = self.story_engine {
+            let context = story_engine.get_current_context().await?;
+            let plot_type = crate::story::PlotType::Goal {
+                objective: objective.to_string(),
+            };
+            
+            story_engine.add_plot_point(
+                context.story_id,
+                plot_type,
+                vec!["cognitive-goal".to_string()],
+            ).await?;
+        }
+        
+        // Send event
+        let _ = self.event_tx.send(CognitiveEvent::GoalCreated(goal_id.clone()));
+        
+        Ok(goal_id)
+    }
+    
+    /// Synchronize cognitive state with story progression
+    pub async fn sync_with_story(&self) -> Result<()> {
+        if let Some(ref story_engine) = self.story_engine {
+            let context = story_engine.get_current_context().await?;
+            
+            // Update attention based on story focus
+            if !context.current_plot.is_empty() {
+                let focus_target = FocusTarget {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    target_type: crate::cognitive::FocusType::Creative,  // Using Creative for narrative focus
+                    priority: 0.8,
+                    relevance: 0.5,
+                    time_allocated: Duration::from_secs(30),
+                    started_at: std::time::Instant::now(),
+                    context: vec![
+                        format!("plot:{}", context.current_plot),
+                        format!("story:{}", context.story_id.0),
+                    ],
+                };
+                
+                self.attention_manager.force_focus(focus_target).await?;
+            }
+            
+            // Update emotional state based on story arc
+            if let Some(arc) = context.current_arc {
+                let emotional_shift = match arc.title.to_lowercase().as_str() {
+                    "tension" => "anxious",
+                    "resolution" => "relieved",
+                    "discovery" => "curious",
+                    _ => "neutral",
+                };
+                
+                let _ = self.event_tx.send(CognitiveEvent::EmotionalShift(emotional_shift.to_string()));
+            }
+            
+            // Log synchronization
+            self.cognitive_logs.write().await.push_back(
+                format!("Synchronized with story: {}", context.current_plot)
+            );
+        }
+        
+        Ok(())
     }
 }
 

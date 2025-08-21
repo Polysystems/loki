@@ -97,6 +97,9 @@ pub enum AgentSpecialization {
 
     /// General specialist - versatile multi-purpose agent
     General,
+    
+    /// Empathetic specialist - emotional understanding and support
+    Empathetic,
 }
 
 impl std::fmt::Display for AgentSpecialization {
@@ -112,6 +115,7 @@ impl std::fmt::Display for AgentSpecialization {
             Self::Technical => write!(f, "Technical"),
             Self::Managerial => write!(f, "Managerial"),
             Self::General => write!(f, "General"),
+            Self::Empathetic => write!(f, "Empathetic"),
         }
     }
 }
@@ -139,9 +143,12 @@ pub enum AgentCapability {
 
     // Social capabilities
     EmotionalIntelligence,
+    EmotionalUnderstanding,
     CommunicationSkills,
     ConflictResolution,
     TeamCollaboration,
+    SocialDynamics,
+    MoralReasoning,
 
     // Guardian capabilities
     SafetyValidation,
@@ -270,7 +277,7 @@ impl Default for AgentConfiguration {
 }
 
 /// Base specialized agent implementation
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SpecializedAgent {
     /// Agent ID
     pub id: AgentId,
@@ -454,6 +461,13 @@ impl SpecializedAgent {
                 AgentCapability::ContentGeneration,
                 AgentCapability::TaskCoordination,
             ]),
+            
+            AgentSpecialization::Empathetic => Ok(vec![
+                AgentCapability::EmotionalUnderstanding,
+                AgentCapability::ConflictResolution,
+                AgentCapability::SocialDynamics,
+                AgentCapability::MoralReasoning,
+            ]),
         }
     }
 
@@ -510,6 +524,7 @@ impl SpecializedAgent {
             AgentSpecialization::Technical => self.execute_technical_task(&task).await?,
             AgentSpecialization::Managerial => self.execute_managerial_task(&task).await?,
             AgentSpecialization::General => self.execute_general_task(&task).await?,
+            AgentSpecialization::Empathetic => self.execute_empathetic_task(&task).await?,
         };
 
         // Update state
@@ -649,6 +664,11 @@ impl SpecializedAgent {
                 traits.insert("adaptable".to_string(), 0.8);
                 traits.insert("versatile".to_string(), 0.85);
                 traits.insert("balanced".to_string(), 0.7);
+            }
+            AgentSpecialization::Empathetic => {
+                traits.insert("compassionate".to_string(), 0.95);
+                traits.insert("understanding".to_string(), 0.9);
+                traits.insert("supportive".to_string(), 0.85);
             }
         }
 
@@ -1144,6 +1164,50 @@ impl SpecializedAgent {
             }),
             execution_time: Duration::from_secs(5),
             confidence: 0.80,
+            insights,
+        })
+    }
+
+    async fn execute_empathetic_task(&self, task: &Task) -> Result<TaskResult> {
+        debug!("Executing empathetic task: {}", task.id);
+
+        let empathetic_request = ToolRequest {
+            intent: "Provide emotional support and understanding".to_string(),
+            tool_name: "empathy_analyzer".to_string(),
+            context: format!("Empathetic task: {}", task.id),
+            parameters: task.payload.clone(),
+            priority: 0.9,
+            expected_result_type: ResultType::Analysis,
+            result_type: ResultType::Analysis,
+            memory_integration: MemoryIntegration {
+                store_result: true,
+                importance: 0.8,
+                tags: vec!["empathy".to_string(), "emotional".to_string()],
+                associations: Vec::new(),
+            },
+            timeout: Some(Duration::from_secs(30)),
+        };
+
+        let empathetic_result = self.tool_manager.execute_tool_request(empathetic_request).await?;
+
+        let mut insights = Vec::new();
+        insights.push("Emotional context analyzed".to_string());
+        insights.push("Support strategies identified".to_string());
+        insights.push("Empathetic response generated".to_string());
+
+        Ok(TaskResult {
+            task_id: task.id.clone(),
+            success: true,
+            output: serde_json::json!({
+                "empathetic_result": empathetic_result,
+                "emotional_metrics": {
+                    "understanding_depth": 0.92,
+                    "support_effectiveness": 0.88,
+                    "emotional_resonance": 0.85,
+                }
+            }),
+            execution_time: Duration::from_secs(5),
+            confidence: 0.85,
             insights,
         })
     }

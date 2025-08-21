@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, broadcast, mpsc, Mutex};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
@@ -115,7 +115,7 @@ pub struct Task {
     pub metadata: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TaskPlatform {
     Jira,
     Linear,
@@ -299,7 +299,43 @@ pub enum TaskEvent {
 }
 
 impl TaskManager {
-    /// Create a placeholder instance for initialization
+    /// Create a new TaskManager with default configuration
+    pub fn new() -> Self {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::{RwLock, mpsc, broadcast};
+        use reqwest::Client;
+        
+        let (task_tx, _task_rx) = mpsc::channel(1000);
+        let (event_tx, _) = broadcast::channel(1000);
+        let (shutdown_tx, _) = broadcast::channel(1);
+        
+        // Use proper initialization instead of placeholders
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let api_config = crate::config::ApiKeysConfig::default();
+        let cognitive_config = crate::cognitive::CognitiveConfig::default();
+        let cognitive_system = rt.block_on(CognitiveSystem::new(api_config, cognitive_config)).unwrap();
+        let memory = rt.block_on(CognitiveMemory::new_minimal()).unwrap();
+        
+        Self {
+            http_client: Client::new(),
+            config: TaskConfig::default(),
+            cognitive_system,
+            memory,
+            calendar_manager: None,
+            tasks: Arc::new(RwLock::new(HashMap::new())),
+            workload_analysis: Arc::new(RwLock::new(None)),
+            task_tx,
+            task_rx: Arc::new(RwLock::new(None)),
+            event_tx,
+            shutdown_tx,
+            stats: Arc::new(RwLock::new(TaskStats::default())),
+            running: Arc::new(RwLock::new(false)),
+        }
+    }
+    
+    /// Create a placeholder instance for initialization (deprecated - use new() instead)
+    #[deprecated(note = "Use new() instead")]
     pub fn placeholder() -> Self {
         use std::collections::HashMap;
         use std::sync::Arc;
@@ -328,7 +364,7 @@ impl TaskManager {
     }
     
     /// Create new task manager
-    pub async fn new(
+    pub async fn new_with_components(
         config: TaskConfig,
         cognitive_system: Arc<CognitiveSystem>,
         memory: Arc<CognitiveMemory>,
@@ -1834,6 +1870,19 @@ impl TaskManager {
         *self.running.write().await = false;
         let _ = self.shutdown_tx.send(());
 
+        Ok(())
+    }
+    
+    /// Get all tasks (alias for get_tasks)
+    pub async fn get_all_tasks(&self) -> Result<Vec<Task>> {
+        let tasks = self.get_tasks().await;
+        Ok(tasks.into_values().collect())
+    }
+    
+    /// Update a task
+    pub async fn update_task(&self, task: Task) -> Result<()> {
+        let mut tasks = self.tasks.write().await;
+        tasks.insert(task.id.clone(), task);
         Ok(())
     }
     

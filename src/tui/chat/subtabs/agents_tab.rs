@@ -44,6 +44,7 @@ impl AgentSpecializationExt for AgentSpecialization {
             Self::Technical => "Technical",
             Self::Managerial => "Managerial",
             Self::General => "General",
+            Self::Empathetic => "Empathetic",
         }
     }
     
@@ -59,6 +60,7 @@ impl AgentSpecializationExt for AgentSpecialization {
             Self::Technical => "Code implementation, system integration, and technical problem-solving",
             Self::Managerial => "Project management, resource coordination, and team leadership",
             Self::General => "Versatile problem-solving across multiple domains and contexts",
+            Self::Empathetic => "Emotional understanding, support, and interpersonal connections",
         }
     }
     
@@ -74,6 +76,7 @@ impl AgentSpecializationExt for AgentSpecialization {
             Self::Technical => "💻",
             Self::Managerial => "👔",
             Self::General => "🔄",
+            Self::Empathetic => "💖",
         }
     }
     
@@ -89,6 +92,7 @@ impl AgentSpecializationExt for AgentSpecialization {
             Self::Technical => vec!["Coding", "Debugging", "System Design", "Tool Integration"],
             Self::Managerial => vec!["Project Management", "Resource Planning", "Team Leadership", "Process Optimization"],
             Self::General => vec!["Multi-Domain Knowledge", "Flexible Problem Solving", "Context Switching", "Generalist Approach"],
+            Self::Empathetic => vec!["Emotional Intelligence", "Active Listening", "Conflict Resolution", "Supportive Communication"],
         }
     }
 }

@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 use regex::Regex;
+use anyhow::{Result, Context};
+use tracing::warn;
 
 /// Enhanced conversation context indexer
 #[derive(Debug, Default)]
@@ -26,12 +28,14 @@ impl ConversationIndexer {
     /// Create a new indexer
     pub fn new() -> Self {
         let mut indexer = Self::default();
-        indexer.initialize_patterns();
+        if let Err(e) = indexer.initialize_patterns() {
+            warn!("Failed to initialize some indexer patterns: {}", e);
+        }
         indexer
     }
     
     /// Initialize topic and entity patterns
-    fn initialize_patterns(&mut self) {
+    fn initialize_patterns(&mut self) -> Result<()> {
         // Initialize topic patterns
         self.topic_patterns.insert("coding".to_string(), vec![
             "code".to_string(), "function".to_string(), "class".to_string(), 
@@ -66,26 +70,37 @@ impl ConversationIndexer {
         // Initialize entity patterns
         self.entity_patterns = vec![
             // URLs
-            (Regex::new(r"https?://[^\s]+").unwrap(), "url".to_string()),
+            (Regex::new(r"https?://[^\s]+")
+                .context("Failed to compile URL regex")?, "url".to_string()),
             // File paths
-            (Regex::new(r"(?:/[^/\s]+)+\.[a-zA-Z]+").unwrap(), "file".to_string()),
+            (Regex::new(r"(?:/[^/\s]+)+\.[a-zA-Z]+")
+                .context("Failed to compile file path regex")?, "file".to_string()),
             // Email addresses
-            (Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap(), "email".to_string()),
+            (Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+                .context("Failed to compile email regex")?, "email".to_string()),
             // IP addresses
-            (Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap(), "ip".to_string()),
+            (Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+                .context("Failed to compile IP address regex")?, "ip".to_string()),
             // GitHub repos
-            (Regex::new(r"(?:github\.com/)?([a-zA-Z0-9-]+/[a-zA-Z0-9-_.]+)").unwrap(), "github".to_string()),
+            (Regex::new(r"(?:github\.com/)?([a-zA-Z0-9-]+/[a-zA-Z0-9-_.]+)")
+                .context("Failed to compile GitHub repo regex")?, "github".to_string()),
             // Package names (npm, cargo, etc)
-            (Regex::new(r"(?:npm|cargo|pip|gem) (?:install|add) ([a-zA-Z0-9-_]+)").unwrap(), "package".to_string()),
+            (Regex::new(r"(?:npm|cargo|pip|gem) (?:install|add) ([a-zA-Z0-9-_]+)")
+                .context("Failed to compile package name regex")?, "package".to_string()),
             // Function/method names
-            (Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(").unwrap(), "function".to_string()),
+            (Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
+                .context("Failed to compile function name regex")?, "function".to_string()),
             // Class names (PascalCase)
-            (Regex::new(r"\b([A-Z][a-zA-Z0-9]+)\b").unwrap(), "class".to_string()),
+            (Regex::new(r"\b([A-Z][a-zA-Z0-9]+)\b")
+                .context("Failed to compile class name regex")?, "class".to_string()),
             // Quoted strings
-            (Regex::new(r#""([^"]+)"|'([^']+)'"#).unwrap(), "quoted".to_string()),
+            (Regex::new(r#""([^"]+)"|'([^']+)'"#)
+                .context("Failed to compile quoted string regex")?, "quoted".to_string()),
             // Version numbers
-            (Regex::new(r"\bv?(\d+\.\d+(?:\.\d+)?)\b").unwrap(), "version".to_string()),
+            (Regex::new(r"\bv?(\d+\.\d+(?:\.\d+)?)\b")
+                .context("Failed to compile version number regex")?, "version".to_string()),
         ];
+        Ok(())
     }
     
     /// Index a message
@@ -127,10 +142,11 @@ impl ConversationIndexer {
         }
         
         // Also extract hashtag-style topics
-        let hashtag_re = Regex::new(r"#([a-zA-Z0-9_]+)").unwrap();
-        for cap in hashtag_re.captures_iter(content) {
-            if let Some(tag) = cap.get(1) {
-                topics.insert(tag.as_str().to_lowercase());
+        if let Ok(hashtag_re) = Regex::new(r"#([a-zA-Z0-9_]+)") {
+            for cap in hashtag_re.captures_iter(content) {
+                if let Some(tag) = cap.get(1) {
+                    topics.insert(tag.as_str().to_lowercase());
+                }
             }
         }
         

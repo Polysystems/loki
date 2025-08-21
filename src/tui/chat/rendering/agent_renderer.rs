@@ -202,7 +202,7 @@ impl AgentRenderer {
 impl ChatRenderer for AgentRenderer {
     fn render(&self, f: &mut Frame, area: Rect) {
         // Create a default agent manager for rendering
-        let agent_manager = AgentManager::placeholder();
+        let agent_manager = AgentManager::new();
         
         // Use the agent management renderer
         self.render_agent_management(f, area, &agent_manager);

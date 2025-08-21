@@ -4,7 +4,7 @@
 //! automatic synchronization and conflict resolution.
 
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::RwLock;
 use std::collections::{HashMap, HashSet};
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
@@ -471,7 +471,7 @@ impl StateSyncManager {
     }
     
     /// Commit a state transaction
-    pub async fn commit_transaction(&self, mut transaction: StateTransaction) -> Result<()> {
+    pub async fn commit_transaction(&self, transaction: StateTransaction) -> Result<()> {
         if transaction.atomic {
             // Apply all changes atomically
             for (key, value) in transaction.changes {

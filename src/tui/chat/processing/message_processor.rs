@@ -9,6 +9,9 @@
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use anyhow::{Result};
+use crate::tui::chat::error::ChatError;
+use crate::tui::chat::utils::{with_timeout, with_timeout_retry, TimeoutConfig, DEFAULT_TIMEOUT};
+use crate::tui::chat::utils::telemetry;
 use uuid::Uuid;
 use serde_json::json;
 use regex::Regex;
@@ -16,8 +19,20 @@ use regex::Regex;
 
 use crate::tui::run::AssistantResponseType;
 use crate::tui::chat::state::ChatState;
-use crate::tui::chat::orchestration::{OrchestrationManager, OrchestrationConnector};
+use crate::tui::chat::orchestration::{
+    OrchestrationManager, OrchestrationConnector,
+    TodoManager, CreateTodoRequest, ModelCallTracker,
+    ModelSelector,
+    todo_manager::{TodoStoryContext, TodoPriority, TodoStatus, PriorityLevel},
+};
 use crate::tui::chat::agents::AgentManager;
+use crate::tui::bridges::{
+    orchestration_bridge::OrchestrationBridge,
+    agent_bridge::AgentBridge,
+    story_bridge::StoryBridge,
+};
+use crate::story::StoryContext as BridgeStoryContext;
+use super::unified_streaming::{UnifiedStreamManager, StreamSource};
 use crate::models::{ModelOrchestrator};
 use crate::tui::chat::core::{ChatToolExecutor, CommandRegistry};
 use crate::tui::chat::integrations::cognitive::CognitiveChatEnhancement;
@@ -87,6 +102,30 @@ pub struct MessageProcessor {
     /// Bridges for cross-tab integration
     bridges: Option<Arc<crate::tui::bridges::UnifiedBridge>>,
     
+    /// Todo manager for task management
+    todo_manager: Option<Arc<TodoManager>>,
+    
+    /// Model call tracker for monitoring
+    call_tracker: Option<Arc<ModelCallTracker>>,
+    
+    /// Orchestration bridge for settings sync
+    orchestration_bridge: Option<Arc<OrchestrationBridge>>,
+    
+    /// Agent bridge for agent configuration
+    agent_bridge: Option<Arc<AgentBridge>>,
+    
+    /// Story bridge for narrative integration
+    story_bridge: Option<Arc<StoryBridge>>,
+    
+    /// Unified stream manager for multiplexed streaming
+    stream_manager: Option<Arc<UnifiedStreamManager>>,
+    
+    /// Storage context for message persistence
+    storage_context: Option<Arc<crate::tui::chat::storage_context::ChatStorageContext>>,
+    
+    /// Model selector for orchestrated execution
+    model_selector: Option<Arc<ModelSelector>>,
+    
     /// Response channel
     response_tx: mpsc::Sender<AssistantResponseType>,
 }
@@ -113,6 +152,14 @@ impl MessageProcessor {
             tools: None,
             event_bus: None,
             bridges: None,
+            todo_manager: None,
+            call_tracker: None,
+            orchestration_bridge: None,
+            agent_bridge: None,
+            story_bridge: None,
+            stream_manager: None,
+            storage_context: None,
+            model_selector: None,
             response_tx,
         }
     }
@@ -134,6 +181,14 @@ impl MessageProcessor {
         // Create orchestration connector
         let mut connector = OrchestrationConnector::new();
         connector.set_orchestrator(orchestrator.clone());
+        
+        // Create model selector with orchestration manager
+        let selector = Arc::new(ModelSelector::new(
+            self.orchestration_manager.clone(),
+            orchestrator.clone(),
+        ));
+        self.model_selector = Some(selector);
+        tracing::info!("Model selector created to bridge orchestration settings");
         
         self.model_orchestrator = Some(orchestrator);
         self.orchestration_connector = Some(connector);
@@ -170,16 +225,75 @@ impl MessageProcessor {
         tracing::info!("Tool integration connected to message processor");
     }
     
+    /// Set the todo manager
+    pub fn set_todo_manager(&mut self, todo_manager: Arc<TodoManager>) {
+        self.todo_manager = Some(todo_manager);
+        tracing::info!("Todo manager connected to message processor");
+    }
+    
+    /// Set the model call tracker
+    pub fn set_call_tracker(&mut self, tracker: Arc<ModelCallTracker>) {
+        self.call_tracker = Some(tracker);
+        tracing::info!("Model call tracker connected to message processor");
+    }
+    
+    /// Set orchestration and agent bridges
+    pub fn set_orchestration_bridges(
+        &mut self,
+        orchestration_bridge: Arc<OrchestrationBridge>,
+        agent_bridge: Arc<AgentBridge>,
+    ) {
+        self.orchestration_bridge = Some(orchestration_bridge);
+        self.agent_bridge = Some(agent_bridge);
+        tracing::info!("Orchestration bridges connected to message processor");
+    }
+    
+    /// Set story bridge and stream manager
+    pub fn set_story_integration(
+        &mut self,
+        story_bridge: Arc<StoryBridge>,
+        stream_manager: Arc<UnifiedStreamManager>,
+    ) {
+        self.story_bridge = Some(story_bridge);
+        self.stream_manager = Some(stream_manager);
+        tracing::info!("Story integration connected to message processor");
+    }
+    
+    /// Set storage context for message persistence
+    pub fn set_storage_context(&mut self, storage_context: Arc<crate::tui::chat::storage_context::ChatStorageContext>) {
+        self.storage_context = Some(storage_context);
+        tracing::info!("Storage context connected to message processor - enabling message persistence");
+    }
+    
     /// Process a user message through the full pipeline
     pub async fn process_message(&mut self, content: &str, chat_id: usize) -> Result<()> {
         tracing::info!("📨 MessageProcessor received message: {}", content);
         tracing::info!("🔍 Has model orchestrator: {}", self.model_orchestrator.is_some());
         
+        // Track operation start time for telemetry
+        let operation_start = std::time::Instant::now();
+        let telemetry_collector = telemetry::telemetry();
+        
         // Add user message to chat history
         {
             let mut state = self.chat_state.write().await;
             let user_message = AssistantResponseType::new_user_message(content.to_string());
-            state.add_message_to_chat(user_message, chat_id);
+            state.add_message_to_chat(user_message.clone(), chat_id);
+            
+            // Persist message to storage if available
+            if let Some(ref storage_context) = self.storage_context {
+                // Convert user message to appropriate format for storage
+                let role = "user".to_string();
+                if let Err(e) = storage_context.add_message(
+                    role,
+                    content.to_string(),
+                    None, // token_count
+                ).await {
+                    tracing::warn!("Failed to persist user message to storage: {}", e);
+                } else {
+                    tracing::debug!("User message persisted to storage");
+                }
+            }
         }
         
         // Publish message received event
@@ -191,8 +305,103 @@ impl MessageProcessor {
             }).await;
         }
         
-        // 1. Check for code generation requests and route to editor
-        if self.looks_like_code_generation(content) {
+        // 1. Extract story context if available
+        let story_context = if let Some(ref story_bridge) = self.story_bridge {
+            story_bridge.extract_story_context(content, &chat_id.to_string()).await.ok().flatten()
+        } else {
+            None
+        };
+        
+        // 2. Check for todo queries first (e.g., "what's on my plate?")
+        if let Some(query_response) = self.handle_todo_query(content).await {
+            let response = AssistantResponseType::new_ai_message(query_response, None);
+            self.response_tx.send(response).await?;
+            return Ok(());
+        }
+        
+        // 3. Check for todo completion (e.g., "I finished the auth refactoring")
+        if let Some(completion_response) = self.detect_todo_completion(content).await {
+            let response = AssistantResponseType::new_ai_message(completion_response, None);
+            self.response_tx.send(response).await?;
+            return Ok(());
+        }
+        
+        // 4. Check for todo/task creation requests with story context
+        if let Some(mut todo_request) = self.extract_todo_request(content).await {
+            if let Some(ref todo_manager) = self.todo_manager {
+                // Add story context to todo request if available
+                if let Some(ref story_ctx) = story_context {
+                    // Now we can properly set the story_context field
+                    todo_request.story_context = Some(TodoStoryContext {
+                        story_id: story_ctx.story_id.to_string(),
+                        plot_point_id: story_ctx.recent_plot_points.last().map(|p| p.id.to_string()),
+                        narrative: story_ctx.current_plot.clone(),
+                        story_arc: None,
+                        related_events: Vec::new(),
+                    });
+                }
+                
+                match todo_manager.create_todo(todo_request).await {
+                    Ok(todo) => {
+                        let response = AssistantResponseType::new_ai_message(
+                            format!("✅ Created todo: {}\n🆔 ID: {}\n📊 Priority: {:?}\n🧠 Complexity: {:.0}%",
+                                todo.title, 
+                                &todo.id[..8],
+                                todo.priority.level,
+                                todo.cognitive_metadata.complexity_score * 100.0
+                            ),
+                            Some("todo-manager".to_string()),
+                        );
+                        self.response_tx.send(response).await?;
+                        
+                        // Map todo to story if story bridge is available
+                        if let Some(ref story_bridge) = self.story_bridge {
+                            let _ = story_bridge.map_todo_to_story(todo.id.clone(), content.to_string()).await;
+                        }
+                        
+                        // Continue processing for additional context
+                        tracing::info!("Todo created, continuing for additional processing");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create todo: {}", e);
+                    }
+                }
+            }
+        }
+        
+        // 2. Check for direct tool/agent execution requests (higher priority)
+        // These should be executed immediately, not sent to editor
+        if self.looks_like_direct_execution(content) {
+            tracing::info!("🔧 Detected direct tool/agent execution request: {}", content);
+            
+            // Try to execute the tool request directly
+            match self.execute_tool_request(content, chat_id).await {
+                Ok(Some(result)) => {
+                    // Send the tool execution result
+                    self.response_tx.send(result).await?;
+                    return Ok(());
+                }
+                Ok(None) => {
+                    // Tool request recognized but couldn't be executed directly
+                    // Continue to model for interpretation
+                    tracing::info!("Tool request needs model interpretation");
+                }
+                Err(e) => {
+                    // Log error but continue with model processing
+                    tracing::warn!("Tool execution failed: {}, falling back to model", e);
+                    // Track error in telemetry
+                    let telemetry = telemetry::telemetry();
+                    let error = ChatError::Tool(crate::tui::chat::error::ToolError::ExecutionFailed(e.to_string()));
+                    tokio::spawn(async move {
+                        telemetry.record_error(&error, "message_processor::tool_execution").await;
+                    });
+                }
+            }
+        }
+        
+        // 2. Check for code generation requests and route to editor
+        // Only if it's specifically about creating/writing new code, not executing tools
+        if self.looks_like_code_generation(content) && !self.looks_like_direct_execution(content) {
             tracing::info!("📝 Detected code generation request: {}", content);
             
             // Route to editor through bridge
@@ -223,29 +432,6 @@ impl MessageProcessor {
             }
         }
         
-        // 2. Check for direct tool requests and execute them
-        if self.looks_like_tool_request(content) {
-            tracing::info!("🔧 Detected tool request in user input: {}", content);
-            
-            // Try to execute the tool request
-            match self.execute_tool_request(content, chat_id).await {
-                Ok(Some(result)) => {
-                    // Send the tool execution result
-                    self.response_tx.send(result).await?;
-                    return Ok(());
-                }
-                Ok(None) => {
-                    // Tool request recognized but couldn't be executed directly
-                    // Continue to model for interpretation
-                    tracing::info!("Tool request needs model interpretation");
-                }
-                Err(e) => {
-                    // Log error but continue with model processing
-                    tracing::warn!("Tool execution failed: {}, falling back to model", e);
-                }
-            }
-        }
-        
         // 2. Try cognitive bridge for enhanced reasoning (only for complex requests)
         if let Some(ref bridges) = self.bridges {
             // Only use cognitive bridge for complex reasoning tasks
@@ -272,7 +458,7 @@ impl MessageProcessor {
                             // Only return early if we got substantial reasoning
                             if !chain.steps.is_empty() || chain.confidence > 0.7 {
                                 let mut response = if !chain.steps.is_empty() {
-                                    format!("💭 Reasoning: {}\n\n", chain.steps.last().unwrap().conclusion)
+                                    format!("💭 Reasoning: {}\n\n", chain.steps.last().map(|s| s.conclusion.as_str()).unwrap_or("completed"))
                                 } else {
                                     format!("💭 Reasoning completed (confidence: {:.0}%)\n\n", chain.confidence * 100.0)
                                 };
@@ -302,6 +488,12 @@ impl MessageProcessor {
                     }
                     Err(e) => {
                         tracing::warn!("Cognitive bridge reasoning failed: {}", e);
+                        // Track error in telemetry
+                        let telemetry = telemetry::telemetry();
+                        let error = ChatError::Internal(format!("Cognitive bridge error: {}", e));
+                        tokio::spawn(async move {
+                            telemetry.record_error(&error, "message_processor::cognitive_bridge").await;
+                        });
                     }
                 }
             } else {
@@ -315,7 +507,22 @@ impl MessageProcessor {
             if let Some(ref cognitive_enhancement) = self.cognitive_enhancement {
                 tracing::info!("🧠 Using cognitive enhancement as fallback (no model orchestrator)");
                 
-                let response = cognitive_enhancement.process_message(content).await;
+                // Add timeout for cognitive enhancement
+                let response = match with_timeout(
+                    DEFAULT_TIMEOUT,
+                    async { Ok::<_, ChatError>(cognitive_enhancement.process_message(content).await) }
+                ).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        tracing::warn!("Cognitive enhancement timed out or failed: {}", e);
+                        // Track error in telemetry
+                        let telemetry = telemetry::telemetry();
+                        tokio::spawn(async move {
+                            telemetry.record_error(&e, "message_processor::cognitive_enhancement").await;
+                        });
+                        return Ok(());
+                    }
+                };
                 
                 if !response.content.is_empty() {
                     let ai_message = AssistantResponseType::new_ai_message(
@@ -351,12 +558,122 @@ impl MessageProcessor {
                 }
                 Err(e) => {
                     tracing::warn!("NLP orchestration failed: {}", e);
+                    // Track error in telemetry
+                    let telemetry = telemetry::telemetry();
+                    let error = ChatError::Nlp(crate::tui::chat::error::NlpError::OrchestratorUnavailable);
+                    tokio::spawn(async move {
+                        telemetry.record_error(&error, "message_processor::nlp_orchestration").await;
+                    });
                     // Fall through to basic model
                 }
             }
         }
         
-        // 4. Fall back to model orchestration
+        // 4. Check orchestration configuration for multi-model execution
+        if let Some(ref orchestration_bridge) = self.orchestration_bridge {
+            if orchestration_bridge.is_enabled().await {
+                let config = orchestration_bridge.get_configuration().await;
+                let parallel_count = config.parallel_models;
+                
+                if parallel_count > 1 {
+                    tracing::info!("🎯 Using orchestration with {} parallel models", parallel_count);
+                    
+                    // Start tracking for orchestrated execution
+                    if let Some(ref tracker) = self.call_tracker {
+                        let session_id = tracker.start_tracking(
+                            "orchestrated-chat",
+                            content,
+                            content.len(),
+                            0.7,
+                            Some(500),
+                        ).await.ok();
+                        
+                        // Execute with orchestration
+                        if let Some(ref orchestrator) = self.model_orchestrator {
+                            // Create orchestrated request
+                            let task_request = self.create_orchestrated_request(content, &config).await?;
+                            
+                            match orchestrator.execute_with_fallback(task_request).await {
+                                Ok(response) => {
+                                    // Complete tracking
+                                    if let Some(sid) = session_id {
+                                        let _ = tracker.complete_tracking(&sid, response.content.len()).await;
+                                    }
+                                    
+                                    let ai_message = AssistantResponseType::new_ai_message(
+                                        response.content,
+                                        Some(format!("orchestrated-{}", response.model_used.model_id())),
+                                    );
+                                    self.response_tx.send(ai_message).await?;
+                                    return Ok(());
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Orchestrated execution failed: {}", e);
+                                    // Fall through to single model
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 5. Check agent configuration for collaborative execution
+        if let Some(ref agent_bridge) = self.agent_bridge {
+            if agent_bridge.is_enabled().await {
+                let mode = agent_bridge.get_collaboration_mode().await;
+                let active_configs = agent_bridge.get_active_configs().await;
+                
+                if !active_configs.is_empty() {
+                    tracing::info!("🤝 Using agent collaboration mode: {:?}", mode);
+                    
+                    // Start agent sessions for each specialization
+                    for config in active_configs {
+                        let session_id = agent_bridge.start_session(
+                            config.specialization.clone(),
+                            format!("chat-{}", chat_id),
+                        ).await.ok();
+                        
+                        tracing::debug!("Started agent session: {:?}", session_id);
+                    }
+                    
+                    // Continue with model execution, agents will enhance response
+                }
+            }
+        }
+        
+        // 6. Create story-driven stream if story bridge is available
+        if let Some(ref story_bridge) = self.story_bridge {
+            if let Some(ref stream_manager) = self.stream_manager {
+                // Check if this is a story-driven request
+                if story_bridge.is_story_driven_request(content).await {
+                    tracing::info!("📖 Processing story-driven request");
+                    
+                    // Create story stream
+                    if let Ok(story_stream) = story_bridge.create_story_stream(content).await {
+                        // Wrap StreamPacket stream into Result<StreamEvent> stream
+                        use futures::stream::StreamExt;
+                        let wrapped_stream = story_stream.map(|packet| {
+                            Ok(crate::tui::chat::processing::streaming::StreamEvent::from(packet))
+                        });
+                        
+                        // Register with stream manager
+                        let _ = stream_manager.create_stream(
+                            StreamSource::Story(crate::tui::chat::processing::unified_streaming::StorySource::Narrative),
+                            wrapped_stream,
+                            std::collections::HashMap::from([
+                                ("chat_id".to_string(), chat_id.to_string()),
+                                ("content".to_string(), content.to_string()),
+                            ]),
+                        ).await;
+                        
+                        tracing::info!("Story stream created and registered");
+                    }
+                }
+            }
+        }
+        
+        // 7. Fall back to model orchestration
         if let Some(ref orchestrator) = self.model_orchestrator {
             tracing::info!("🤖 Processing through model orchestrator");
             let status = orchestrator.get_status().await;
@@ -367,7 +684,45 @@ impl MessageProcessor {
             tracing::info!("📝 Task request: prefer_local={}, constraints={:?}", 
                 task_request.constraints.prefer_local, task_request.constraints);
             
-            match orchestrator.execute_with_fallback(task_request).await {
+            // Use model selector if available for orchestrated execution
+            let response = if let Some(ref selector) = self.model_selector {
+                tracing::info!("🎯 Using model selector for orchestrated execution");
+                
+                // Get orchestration status
+                let orch_status = selector.get_status().await;
+                tracing::info!("📊 Orchestration: enabled={}, models={}, strategy={}, parallel={}", 
+                    orch_status.enabled, orch_status.model_count, orch_status.routing_strategy, orch_status.parallel_execution);
+                
+                // Execute with orchestration
+                match selector.execute_with_orchestration(task_request.clone()).await {
+                    Ok(resp) => Ok(resp),
+                    Err(e) => {
+                        tracing::warn!("Model selector failed: {}, falling back to direct execution", e);
+                        // Fall back to direct orchestrator execution
+                        orchestrator.execute_with_fallback(task_request.clone()).await
+                            .map_err(|e| ChatError::Internal(format!("Orchestrator error: {}", e)))
+                    }
+                }
+            } else {
+                // Direct orchestrator execution
+                tracing::info!("Using direct orchestrator execution (no model selector)");
+                
+                // Use retry logic for model orchestrator calls
+                let retry_config = TimeoutConfig::default();
+                let orchestrator_clone = orchestrator.clone();
+                let task_request_clone = task_request.clone();
+                
+                with_timeout_retry(&retry_config, || {
+                    let orchestrator = orchestrator_clone.clone();
+                    let request = task_request_clone.clone();
+                    async move {
+                        orchestrator.execute_with_fallback(request).await
+                            .map_err(|e| ChatError::Internal(format!("Orchestrator error: {}", e)))
+                    }
+                }).await
+            };
+            
+            match response {
                 Ok(response) => {
                     tracing::info!("✅ Got response from model: {} (length: {})", 
                         response.model_used.model_id(), response.content.len());
@@ -397,7 +752,7 @@ impl MessageProcessor {
                         
                         if needs_agent {
                             // Create and spawn a code agent
-                            let (agent_tx, mut agent_rx) = mpsc::channel(100);
+                            let (agent_tx, agent_rx) = mpsc::channel(100);
                             let agent = self.spawn_code_agent(content, agent_tx).await;
                             
                             // Execute tasks through agent
@@ -470,7 +825,53 @@ impl MessageProcessor {
             self.response_tx.send(error_message).await?;
         }
         
+        // Record successful operation in telemetry
+        let operation_duration = operation_start.elapsed();
+        let telemetry_clone = telemetry_collector.clone();
+        tokio::spawn(async move {
+            telemetry_clone.record_operation(operation_duration, true).await;
+        });
+        
         Ok(())
+    }
+    
+    /// Check if input looks like direct tool/agent execution (not code generation)
+    fn looks_like_direct_execution(&self, content: &str) -> bool {
+        let lower = content.to_lowercase();
+        
+        // Check for explicit agent/tool invocation patterns
+        if lower.starts_with("use ") || lower.starts_with("call ") || 
+           lower.starts_with("invoke ") || lower.starts_with("execute ") ||
+           lower.starts_with("run ") || lower.starts_with("agent:") ||
+           lower.starts_with("tool:") || lower.starts_with("/") {
+            return true;
+        }
+        
+        // Check for specific tool action patterns
+        let tool_patterns = [
+            "search for", "find files", "grep for", "look for",
+            "list files", "show files", "check status",
+            "run tests", "run build", "compile", "execute script",
+            "git status", "git diff", "git log", "commit",
+            "analyze code", "review code", "check syntax",
+            "open terminal", "run command", "shell command",
+        ];
+        
+        for pattern in &tool_patterns {
+            if lower.contains(pattern) {
+                return true;
+            }
+        }
+        
+        // Check if it's a shell command pattern (contains common shell commands)
+        let shell_commands = ["ls", "cd", "pwd", "cat", "grep", "find", "npm", "cargo", "python", "node"];
+        for cmd in &shell_commands {
+            if lower.split_whitespace().any(|word| word == *cmd) {
+                return true;
+            }
+        }
+        
+        false
     }
     
     /// Check if input looks like a tool request
@@ -537,15 +938,22 @@ impl MessageProcessor {
     fn looks_like_code_generation(&self, content: &str) -> bool {
         let lower = content.to_lowercase();
         
-        // Explicit code generation patterns
+        // Don't treat as code generation if it's a direct execution request
+        if self.looks_like_direct_execution(content) {
+            return false;
+        }
+        
+        // Explicit code generation patterns (for creating new code, not executing)
         let generation_patterns = [
-            "implement", "create a function", "write a function", "write code",
-            "generate code", "create code", "build a", "develop a",
-            "write a program", "create a program", "implement a",
-            "code for", "script for", "function to", "method to",
-            "class for", "module for", "component for",
+            "implement a function", "create a function", "write a function",
+            "implement a class", "create a class", "write a class",
+            "write code for", "generate code for", "create code for",
+            "build a component", "develop a feature", "design a system",
+            "write a program", "create a program", "implement a solution",
+            "code for me", "script for me", "function to do",
             "help me implement", "help me write", "help me create",
-            "show me how to", "example of", "template for",
+            "show me how to code", "example code for", "template for",
+            "can you write", "can you implement", "please write code",
         ];
         
         // Check for any generation pattern
@@ -928,6 +1336,7 @@ You can also use natural language to request actions or paste code blocks to exe
             prefer_local: true, // Always prefer local models to avoid API calls
             require_streaming: true, // Enable streaming for agent streams and real-time responses
             required_capabilities: Vec::new(),
+            task_hint: None,
             creativity_level: None,
             formality_level: None,
             target_audience: None,
@@ -1007,7 +1416,13 @@ You can also use natural language to request actions or paste code blocks to exe
             // Look for file creation patterns with code blocks
             if response.contains("```") {
                 // Extract code blocks with file paths
-                let code_block_re = regex::Regex::new(r"(?s)(?:Create|create|File:|file:)\s*`?([/\w\-\.]+)`?.*?```(\w+)?\n(.*?)```").unwrap();
+                let code_block_re = match regex::Regex::new(r"(?s)(?:Create|create|File:|file:)\s*`?([/\w\-\.]+)`?.*?```(\w+)?\n(.*?)```") {
+                    Ok(re) => re,
+                    Err(e) => {
+                        tracing::error!("Failed to compile regex: {}", e);
+                        return Vec::new();
+                    }
+                };
                 for cap in code_block_re.captures_iter(response) {
                     if let (Some(file_path), Some(code)) = (cap.get(1), cap.get(3)) {
                         let language = cap.get(2).map(|m| m.as_str().to_string());
@@ -1071,7 +1486,9 @@ You can also use natural language to request actions or paste code blocks to exe
                                     format!("✅ Created directory: {}", path),
                                     Some("tool-executor".to_string()),
                                 );
-                                let _ = self.response_tx.send(notification).await;
+                                if let Err(e) = self.response_tx.send(notification).await {
+                                    tracing::warn!("Failed to send notification: {}", e);
+                                }
                             }
                             Err(e) => {
                                 tracing::error!("Failed to create directory {}: {}", path, e);
@@ -1084,7 +1501,9 @@ You can also use natural language to request actions or paste code blocks to exe
                                         format!("✅ Created directory: {}", path),
                                         Some("filesystem".to_string()),
                                     );
-                                    let _ = self.response_tx.send(notification).await;
+                                    if let Err(e) = self.response_tx.send(notification).await {
+                                    tracing::warn!("Failed to send notification: {}", e);
+                                }
                                 }
                             }
                         }
@@ -1096,7 +1515,9 @@ You can also use natural language to request actions or paste code blocks to exe
                             format!("✅ Created directory: {}", path),
                             Some("filesystem".to_string()),
                         );
-                        let _ = self.response_tx.send(notification).await;
+                        if let Err(e) = self.response_tx.send(notification).await {
+                            tracing::warn!("Failed to send notification: {}", e);
+                        }
                     }
                 }
             }
@@ -1128,47 +1549,416 @@ You can also use natural language to request actions or paste code blocks to exe
         Ok(())
     }
     
-    /// Spawn a code agent for complex tasks
+    /// Analyze requirements to determine which types of agents are needed
+    fn analyze_requirements(&self, content: &str) -> Vec<crate::tui::chat::agents::code_agent::AgentRequirement> {
+        use crate::tui::chat::agents::code_agent::AgentRequirement;
+        
+        let mut requirements = Vec::new();
+        let lower = content.to_lowercase();
+        
+        // Check for frontend requirements
+        if lower.contains("frontend") || lower.contains("react") || lower.contains("typescript") ||
+           lower.contains("ui") || lower.contains("interface") || lower.contains("vue") ||
+           lower.contains("angular") || lower.contains("svelte") {
+            requirements.push(AgentRequirement::Frontend);
+        }
+        
+        // Check for backend requirements
+        if lower.contains("backend") || lower.contains("rust") || lower.contains("server") ||
+           lower.contains("api") || lower.contains("endpoint") || lower.contains("microservice") {
+            requirements.push(AgentRequirement::Backend);
+        }
+        
+        // Check for data processing/Python requirements
+        if lower.contains("python") || lower.contains("streaming") || lower.contains("data process") ||
+           lower.contains("ml") || lower.contains("machine learning") || lower.contains("pandas") {
+            requirements.push(AgentRequirement::DataProcessing);
+        }
+        
+        // Check for testing requirements
+        if lower.contains("test") || lower.contains("jest") || lower.contains("pytest") ||
+           lower.contains("unit test") || lower.contains("integration test") {
+            requirements.push(AgentRequirement::Testing);
+        }
+        
+        // Check for DevOps requirements
+        if lower.contains("docker") || lower.contains("kubernetes") || lower.contains("ci/cd") ||
+           lower.contains("deploy") || lower.contains("terraform") {
+            requirements.push(AgentRequirement::DevOps);
+        }
+        
+        // Check for database requirements
+        if lower.contains("database") || lower.contains("sql") || lower.contains("postgres") ||
+           lower.contains("mongodb") || lower.contains("redis") {
+            requirements.push(AgentRequirement::Database);
+        }
+        
+        // Check for mobile requirements
+        if lower.contains("mobile") || lower.contains("react native") || lower.contains("flutter") ||
+           lower.contains("ios") || lower.contains("android") {
+            requirements.push(AgentRequirement::Mobile);
+        }
+        
+        // If no specific requirements found, add a general agent
+        if requirements.is_empty() {
+            requirements.push(AgentRequirement::General);
+        }
+        
+        // Remove duplicates
+        requirements.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+        requirements.dedup();
+        
+        requirements
+    }
+    
+    /// Extract todo request from message content with enhanced patterns
+    async fn extract_todo_request(&self, content: &str) -> Option<CreateTodoRequest> {
+        let lower = content.to_lowercase();
+        
+        // Enhanced todo/task detection patterns
+        let is_todo = lower.contains("todo") || lower.contains("task") || 
+                     lower.contains("remind me") || lower.contains("need to") ||
+                     lower.starts_with("todo:") || lower.starts_with("task:") ||
+                     lower.contains("add to list") || lower.contains("create task") ||
+                     lower.contains("i need to") || lower.contains("we should") ||
+                     lower.contains("don't forget") || lower.contains("don't let me forget") ||
+                     lower.contains("later we") || lower.contains("after this") ||
+                     lower.contains("make sure to") || lower.contains("remember to");
+        
+        if !is_todo {
+            return None;
+        }
+        
+        // Extract title from content
+        let title = if let Some(idx) = lower.find("todo:") {
+            content[idx + 5..].trim().to_string()
+        } else if let Some(idx) = lower.find("task:") {
+            content[idx + 5..].trim().to_string()
+        } else if lower.starts_with("remind me to") {
+            content[12..].trim().to_string()
+        } else if lower.starts_with("need to") {
+            content[7..].trim().to_string()
+        } else {
+            // Use the whole content as title
+            content.to_string()
+        };
+        
+        if title.is_empty() {
+            return None;
+        }
+        
+        Some(CreateTodoRequest {
+            title,
+            description: None,
+            creator: "user".to_string(),
+            assignee: None,
+            due_date: None,
+            tags: self.extract_tags(content),
+            parent_id: None,
+            dependency_ids: Vec::new(),
+            priority_hint: self.detect_priority_hint(content),
+            story_context: None,
+            priority: None,
+            energy_required: None,
+            focus_required: None,
+            context: None,
+        })
+    }
+    
+    /// Extract tags from content
+    fn extract_tags(&self, content: &str) -> Vec<String> {
+        let mut tags = Vec::new();
+        
+        // Extract hashtags
+        let re = regex::Regex::new(r"#(\w+)").unwrap();
+        for cap in re.captures_iter(content) {
+            if let Some(tag) = cap.get(1) {
+                tags.push(tag.as_str().to_string());
+            }
+        }
+        
+        // Add contextual tags
+        let lower = content.to_lowercase();
+        if lower.contains("urgent") || lower.contains("asap") {
+            tags.push("urgent".to_string());
+        }
+        if lower.contains("bug") || lower.contains("fix") {
+            tags.push("bug".to_string());
+        }
+        if lower.contains("feature") || lower.contains("implement") {
+            tags.push("feature".to_string());
+        }
+        
+        tags
+    }
+    
+    /// Detect priority hint from content
+    fn detect_priority_hint(&self, content: &str) -> Option<f32> {
+        let lower = content.to_lowercase();
+        
+        if lower.contains("critical") || lower.contains("urgent") || lower.contains("asap") {
+            Some(0.9)
+        } else if lower.contains("high priority") || lower.contains("important") {
+            Some(0.7)
+        } else if lower.contains("low priority") || lower.contains("when you can") {
+            Some(0.3)
+        } else {
+            None
+        }
+    }
+    
+    /// Handle todo queries (e.g., "what do I need to do?", "show my todos")
+    async fn handle_todo_query(&self, content: &str) -> Option<String> {
+        let lower = content.to_lowercase();
+        
+        // Check if this is a todo query
+        let is_query = lower.contains("what do i need") || lower.contains("what's on my") ||
+                      lower.contains("show my todo") || lower.contains("list todo") ||
+                      lower.contains("show todo") || lower.contains("my tasks") ||
+                      lower.contains("what tasks") || lower.contains("pending todo") ||
+                      lower.contains("active todo") || lower.contains("what's on my plate");
+        
+        if !is_query {
+            return None;
+        }
+        
+        // Get todos from todo manager if available
+        if let Some(ref todo_manager) = self.todo_manager {
+            let todos = todo_manager.get_todos().await;
+            
+            if todos.is_empty() {
+                return Some("You don't have any active todos at the moment. 🎉".to_string());
+            }
+            
+            let mut response = format!("You have {} active todo{}:\n\n", 
+                                     todos.len(), 
+                                     if todos.len() == 1 { "" } else { "s" });
+            
+            for (i, todo) in todos.iter().enumerate() {
+                let priority_emoji = match &todo.priority.level {
+                    PriorityLevel::Critical => "🔴",
+                    PriorityLevel::High => "🟠", 
+                    PriorityLevel::Medium => "🟡",
+                    PriorityLevel::Low => "🟢",
+                    PriorityLevel::Minimal => "⚪",
+                };
+                
+                let status_emoji = match &todo.status {
+                    TodoStatus::InProgress => "⚡",
+                    TodoStatus::Blocked => "🚫",
+                    TodoStatus::Review => "👁️",
+                    _ => "📝",
+                };
+                
+                response.push_str(&format!("{}. {} {} {} - {}\n",
+                    i + 1,
+                    priority_emoji,
+                    status_emoji,
+                    todo.title,
+                    &todo.id[..8]
+                ));
+                
+                if let Some(desc) = &todo.description {
+                    response.push_str(&format!("   {}\n", desc));
+                }
+            }
+            
+            response.push_str("\n💡 Tip: Say 'I finished <task>' to mark a todo as complete.");
+            
+            return Some(response);
+        }
+        
+        None
+    }
+    
+    /// Detect todo completion in messages
+    async fn detect_todo_completion(&self, content: &str) -> Option<String> {
+        let lower = content.to_lowercase();
+        
+        // Check for completion patterns
+        let is_completion = lower.contains("finished") || lower.contains("completed") ||
+                           lower.contains("done with") || lower.contains("i've done") ||
+                           lower.contains("that's done") || lower.contains("task complete") ||
+                           lower.contains("todo complete") || lower.contains("i just finished");
+        
+        if !is_completion {
+            return None;
+        }
+        
+        // Try to find what was completed
+        if let Some(ref todo_manager) = self.todo_manager {
+            let todos = todo_manager.get_todos().await;
+            let has_todos = !todos.is_empty();
+            
+            // Look for matching todos by keywords in the content
+            for todo in todos {
+                let todo_lower = todo.title.to_lowercase();
+                
+                // Check if the content mentions this todo
+                let words: Vec<&str> = todo_lower.split_whitespace().collect();
+                let mut match_count = 0;
+                
+                for word in &words {
+                    if lower.contains(word) && word.len() > 3 { // Skip short words
+                        match_count += 1;
+                    }
+                }
+                
+                // If at least 50% of the todo's words are mentioned, consider it a match
+                if match_count >= words.len() / 2 && match_count > 0 {
+                    // Mark as complete
+                    if let Ok(_) = todo_manager.update_status(&todo.id, TodoStatus::Completed).await {
+                        return Some(format!(
+                            "✅ Great! I've marked '{}' as complete.\n\n{}",
+                            todo.title,
+                            self.suggest_next_todo(&todo.id).await.unwrap_or_default()
+                        ));
+                    }
+                }
+            }
+            
+            // If no specific match found but user says something is done, ask for clarification
+            if has_todos {
+                return Some("Which todo did you complete? You can tell me the task name or ID.".to_string());
+            }
+        }
+        
+        None
+    }
+    
+    /// Suggest the next todo after completing one
+    async fn suggest_next_todo(&self, completed_id: &str) -> Option<String> {
+        if let Some(ref todo_manager) = self.todo_manager {
+            let todos = todo_manager.get_todos().await;
+            
+            // Filter out the completed one and get highest priority
+            let mut remaining: Vec<_> = todos.iter()
+                .filter(|t| t.id != completed_id && t.status != TodoStatus::Completed)
+                .collect();
+            
+            if remaining.is_empty() {
+                return Some("🎉 All todos complete! You're all caught up.".to_string());
+            }
+            
+            // Sort by priority (Critical > High > Medium > Low > Optional)
+            remaining.sort_by(|a, b| {
+                let a_priority = match a.priority.level {
+                    PriorityLevel::Critical => 5,
+                    PriorityLevel::High => 4,
+                    PriorityLevel::Medium => 3,
+                    PriorityLevel::Low => 2,
+                    PriorityLevel::Minimal => 1,
+                };
+                let b_priority = match b.priority.level {
+                    PriorityLevel::Critical => 5,
+                    PriorityLevel::High => 4,
+                    PriorityLevel::Medium => 3,
+                    PriorityLevel::Low => 2,
+                    PriorityLevel::Minimal => 1,
+                };
+                b_priority.cmp(&a_priority)
+            });
+            
+            if let Some(next) = remaining.first() {
+                return Some(format!("Your next priority is: {} '{}'", 
+                    match next.priority.level {
+                        PriorityLevel::Critical => "🔴 Critical",
+                        PriorityLevel::High => "🟠 High",
+                        PriorityLevel::Medium => "🟡 Medium",
+                        PriorityLevel::Low => "🟢 Low",
+                        PriorityLevel::Minimal => "⚪ Minimal",
+                    },
+                    next.title
+                ));
+            }
+        }
+        
+        None
+    }
+    
+    /// Create orchestrated request with configuration
+    async fn create_orchestrated_request(
+        &self,
+        content: &str,
+        config: &crate::tui::bridges::orchestration_bridge::OrchestrationConfig,
+    ) -> Result<crate::models::orchestrator::TaskRequest> {
+        use crate::models::orchestrator::{TaskRequest, TaskType, TaskConstraints};
+        
+        let mut request = self.create_task_request(content).await?;
+        
+        // Apply orchestration configuration
+        request.constraints.max_tokens = Some((config.timeout_seconds * 10) as u32);
+        request.constraints.priority = if config.cost_optimization { "low".to_string() } else { "high".to_string() };
+        request.constraints.quality_threshold = Some(config.quality_threshold);
+        
+        // Set parallel execution hint
+        if config.parallel_models > 1 {
+            request.constraints.required_capabilities.push("parallel".to_string());
+        }
+        
+        Ok(request)
+    }
+    
+    /// Spawn multiple specialized agents based on requirements
+    async fn spawn_agents_for_requirements(
+        &self,
+        requirements: &str,
+        update_tx: mpsc::Sender<crate::tui::chat::agents::code_agent::AgentUpdate>,
+    ) -> Vec<Arc<crate::tui::chat::agents::code_agent::CodeAgent>> {
+        use crate::tui::chat::agents::code_agent::{CodeAgentFactory, CodeAgent};
+        
+        let agent_requirements = self.analyze_requirements(requirements);
+        let mut agents = Vec::new();
+        
+        tracing::info!("🎯 Detected {} agent requirements from user request", agent_requirements.len());
+        
+        for req in agent_requirements {
+            // Create specialized agent for this requirement
+            let agent = CodeAgentFactory::create_specialized_agent(req.clone(), update_tx.clone());
+            
+            // Set model orchestrator if available
+            let agent = if let Some(ref orchestrator) = self.model_orchestrator {
+                let mut agent = agent;
+                agent.set_model_orchestrator(orchestrator.clone());
+                agent
+            } else {
+                agent
+            };
+            
+            // Set editor bridge if available
+            let agent = if let Some(ref bridges) = self.bridges {
+                let mut agent = agent;
+                agent.set_editor_bridge(bridges.editor_bridge.clone());
+                agent
+            } else {
+                agent
+            };
+            
+            let agent = Arc::new(agent);
+            
+            // Notify about agent creation
+            let notification = AssistantResponseType::new_ai_message(
+                format!("🤖 {} spawned", agent.name()),
+                Some("agent-manager".to_string()),
+            );
+            let _ = self.response_tx.send(notification).await;
+            
+            tracing::info!("Spawned specialized agent: {}", agent.name());
+            agents.push(agent);
+        }
+        
+        agents
+    }
+    
+    /// Spawn a code agent for complex tasks (legacy - kept for compatibility)
     async fn spawn_code_agent(
         &self,
         requirements: &str,
         update_tx: mpsc::Sender<crate::tui::chat::agents::code_agent::AgentUpdate>,
     ) -> Option<Arc<crate::tui::chat::agents::code_agent::CodeAgent>> {
-        use crate::tui::chat::agents::code_agent::{CodeAgentFactory, CodeAgent};
-        
-        // Create agent through factory
-        let agent = CodeAgentFactory::create_agent(requirements, update_tx);
-        
-        // Set model orchestrator if available
-        let agent = if let Some(ref orchestrator) = self.model_orchestrator {
-            let mut agent = agent;
-            agent.set_model_orchestrator(orchestrator.clone());
-            agent
-        } else {
-            agent
-        };
-        
-        // Set editor bridge if available
-        let agent = if let Some(ref bridges) = self.bridges {
-            let mut agent = agent;
-            agent.set_editor_bridge(bridges.editor_bridge.clone());
-            agent
-        } else {
-            agent
-        };
-        
-        let agent = Arc::new(agent);
-        
-        // Notify about agent creation
-        let notification = AssistantResponseType::new_ai_message(
-            format!("🤖 Code Agent spawned: {}", agent.name()),
-            Some("agent-manager".to_string()),
-        );
-        let _ = self.response_tx.send(notification).await;
-        
-        tracing::info!("Spawned code agent: {}", agent.name());
-        
-        Some(agent)
+        // For backward compatibility, just spawn the first agent from multi-agent method
+        let agents = self.spawn_agents_for_requirements(requirements, update_tx).await;
+        agents.into_iter().next()
     }
     
     /// Check if input looks like a task request
@@ -1224,7 +2014,9 @@ You can also use natural language to request actions or paste code blocks to exe
                             format!("📋 Task created: {} (ID: {})", task.description, &created_task.id[..8]),
                             Some("task-manager".to_string()),
                         );
-                        let _ = self.response_tx.send(notification).await;
+                        if let Err(e) = self.response_tx.send(notification).await {
+                            tracing::warn!("Failed to send notification: {}", e);
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to create task '{}': {}", task.description, e);
@@ -1239,6 +2031,38 @@ You can also use natural language to request actions or paste code blocks to exe
     fn map_task_priority(&self, nlp_priority: &TaskPriority) -> TaskPriority {
         // Since both use the same TaskPriority enum now, just clone it
         nlp_priority.clone()
+    }
+    
+    /// Send response with optional storage persistence
+    async fn send_response_with_persistence(
+        &self,
+        response: AssistantResponseType,
+        _chat_id: usize,
+    ) -> Result<()> {
+        // Send the response through the channel
+        self.response_tx.send(response.clone()).await?;
+        
+        // Persist to storage if available
+        if let Some(ref storage_context) = self.storage_context {
+            // Extract message content from AssistantResponseType
+            if let AssistantResponseType::Message { message, metadata, .. } = &response {
+                let role = "assistant".to_string();
+                let content = message.clone();
+                let token_count = metadata.tokens_used.map(|t| t as i32);
+                
+                if let Err(e) = storage_context.add_message(
+                    role,
+                    content,
+                    token_count,
+                ).await {
+                    tracing::warn!("Failed to persist assistant message to storage: {}", e);
+                } else {
+                    tracing::debug!("Assistant message persisted to storage");
+                }
+            }
+        }
+        
+        Ok(())
     }
     
     /// Build additional context for task creation

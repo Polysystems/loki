@@ -258,6 +258,7 @@ impl ModelRegistry {
                 prefer_local: false,
                 require_streaming: false,
                 required_capabilities: vec![],
+                task_hint: None,
                 creativity_level: Some(0.1),
                 formality_level: None,
                 target_audience: None,

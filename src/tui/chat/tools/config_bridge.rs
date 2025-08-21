@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::{Serialize, Deserialize};
-use anyhow::Result;
+use anyhow::{Result, Context};
 use tracing::{info, debug, warn};
 
 use super::discovery::{ToolDiscoveryEngine, ToolCategory, ToolStatus};
@@ -550,13 +550,84 @@ impl ToolConfigBridge {
     
     /// Load configurations from storage
     async fn load_configurations(&self) -> Result<()> {
-        // TODO: Load from persistent storage
+        use std::path::PathBuf;
+        use tokio::fs;
+        
+        // Get config directory
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine config directory. Please ensure HOME environment variable is set"))?
+            .join("loki")
+            .join("chat")
+            .join("tools");
+        
+        // Load tool configurations if file exists
+        let tool_config_path = config_dir.join("tool_configs.json");
+        if tool_config_path.exists() {
+            let content = fs::read_to_string(&tool_config_path).await
+                .context("Failed to read tool configurations")?;
+            let configs: HashMap<String, ToolConfiguration> = serde_json::from_str(&content)
+                .context("Failed to parse tool configurations")?;
+            
+            let mut tool_configs = self.configurations.write().await;
+            tool_configs.extend(configs);
+            
+            tracing::info!("Loaded {} tool configurations from storage", tool_configs.len());
+        }
+        
+        // Load global policies if file exists
+        let policy_path = config_dir.join("global_policies.json");
+        if policy_path.exists() {
+            let content = fs::read_to_string(&policy_path).await
+                .context("Failed to read global policies")?;
+            let policies: GlobalToolPolicies = serde_json::from_str(&content)
+                .context("Failed to parse global policies")?;
+            
+            let mut global_policies = self.global_policies.write().await;
+            *global_policies = policies;
+            
+            tracing::info!("Loaded global policies from storage");
+        }
+        
         Ok(())
     }
     
     /// Save configurations to storage
     pub async fn save_configurations(&self) -> Result<()> {
-        // TODO: Save to persistent storage
+        use std::path::PathBuf;
+        use tokio::fs;
+        
+        // Get config directory and create if needed
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine config directory. Please ensure HOME environment variable is set"))?
+            .join("loki")
+            .join("chat")
+            .join("tools");
+        
+        fs::create_dir_all(&config_dir).await
+            .context("Failed to create config directory")?;
+        
+        // Save tool configurations
+        let tool_configs = self.configurations.read().await;
+        if !tool_configs.is_empty() {
+            let tool_config_path = config_dir.join("tool_configs.json");
+            let content = serde_json::to_string_pretty(&*tool_configs)
+                .context("Failed to serialize tool configurations")?;
+            fs::write(&tool_config_path, content).await
+                .context("Failed to write tool configurations")?;
+            
+            tracing::info!("Saved {} tool configurations to storage", tool_configs.len());
+        }
+        
+        // Save global policies
+        let global_policies = self.global_policies.read().await;
+        let policy_path = config_dir.join("global_policies.json");
+        let content = serde_json::to_string_pretty(&*global_policies)
+            .context("Failed to serialize global policies")?;
+        fs::write(&policy_path, content).await
+            .context("Failed to write global policies")?;
+        
+        tracing::info!("Saved global policies to storage");
+        
         Ok(())
     }
 }

@@ -1011,6 +1011,7 @@ impl SlackClient {
                 priority: "normal".to_string(),
                 prefer_local: false,
                 require_streaming: false,
+                task_hint: None, // Let orchestrator select based on user config
                 required_capabilities: Vec::new(),
                 creativity_level: Some(match user_profile.cognitive_style.thinking_style {
                     ThinkingStyle::Creative => 0.6,   // Moderate creativity for workplace

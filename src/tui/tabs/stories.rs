@@ -926,6 +926,9 @@ impl StoriesTab {
                     PlotType::Progress { .. } => "📊",
                     PlotType::Analysis { .. } => "🔍",
                     PlotType::Action { .. } => "⚡",
+                    PlotType::Reasoning { .. } => "🧠",
+                    PlotType::Event { .. } => "📌",
+                    PlotType::Context { .. } => "📄",
                 };
                 
                 let point_desc_preview = point.description.chars().take(60).collect::<String>();
@@ -1037,6 +1040,9 @@ impl StoriesTab {
                         PlotType::Progress { .. } => "Progress",
                         PlotType::Analysis { .. } => "Analysis",
                         PlotType::Action { .. } => "Action",
+                        PlotType::Reasoning { .. } => "Reasoning",
+                        PlotType::Event { .. } => "Event",
+                        PlotType::Context { .. } => "Context",
                     };
                     *plot_type_counts.entry(plot_type_name).or_insert(0) += 1;
                 }

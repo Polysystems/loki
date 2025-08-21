@@ -56,6 +56,7 @@ pub enum GoalType {
     Creative,    // Creative pursuits
     Personal,    // Personal development
     Problem,     // Problem-solving goals
+    Achievement, // Achievement-based goals
 }
 
 /// Goal state
@@ -1071,6 +1072,12 @@ impl GoalManager {
                      I work toward effective solutions."
                 )
             }
+            GoalType::Achievement => {
+                format!(
+                    "This achievement goal marks a significant milestone in the journey, \
+                     representing tangible progress and demonstrable capability."
+                )
+            }
         };
 
         // Add temporal context based on target completion
@@ -1122,6 +1129,7 @@ impl GoalManager {
             GoalType::Operational => "efficient_executor",
             GoalType::Personal => "self_developer",
             GoalType::Problem => "analytical_problem_solver",
+            GoalType::Achievement => "accomplished_achiever",
         }
         .to_string();
 
